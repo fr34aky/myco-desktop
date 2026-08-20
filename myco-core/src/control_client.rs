@@ -38,6 +38,7 @@ pub fn socket_path(data_dir: &str) -> String {
 /// default resolution lands on `/run/fips`). The desktop app's daemon backend
 /// talks to this instead of an app-private socket; access is gated by the
 /// `fips` group.
+#[allow(dead_code)] // consumed once the daemon backend is implemented
 pub const SYSTEM_SOCKET_PATH: &str = "/run/fips/control.sock";
 
 /// Matches the 5s both fips's server and its reference client use.

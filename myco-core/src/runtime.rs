@@ -366,10 +366,9 @@ impl AppRuntime {
         // device's nsites at ws://<npub>.fips:4870 / http://<npub>.fips:24243.
         // Bound IPV6_V6ONLY (the mesh is IPv6-only) so `[::]:port` doesn't collide
         // with another app squatting on `127.0.0.1:port`; a port already in use
-        // surfaces as a warning. Android-only (the host has no TUN). ports.md.
-        #[allow(unused_mut)]
+        // surfaces as a warning. Gated by config, not platform: Android and the
+        // desktop app serve, host tests default to off. ports.md.
         let mut mesh_warning = String::new();
-        #[cfg(target_os = "android")]
         if config.start_content_servers {
             use std::net::SocketAddr;
             let _guard = rt.enter(); // runtime context for TcpListener::from_std
@@ -2145,6 +2144,57 @@ mod tests {
             "the reason must survive into the banner, got: {error}"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The content servers are gated by config, not platform: a host runtime
+    /// constructed with `start_content_servers: true` must actually accept on
+    /// the relay (mesh and loopback sockets), the auth service, and the mesh
+    /// Blossom — the desktop app's whole content plane. The default host
+    /// config binds nothing, which is what lets the rest of this module run in
+    /// parallel without port fights; this is the one test that claims the
+    /// ports.
+    #[test]
+    fn content_servers_bind_on_host_when_configured() {
+        let dir = temp_dir("host-content-servers");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let rt = AppRuntime::with_config(RuntimeConfig {
+            data_dir: dir.to_str().unwrap().to_string(),
+            app_version: "test".to_string(),
+            backend: MeshBackend::Embedded {
+                ble: false,
+                lan_udp: false,
+                tun: TunPolicy::Disabled,
+            },
+            start_content_servers: true,
+        });
+        let state = rt.state();
+        assert_eq!(
+            state.error, "",
+            "no server bind may warn on a host with free ports"
+        );
+
+        // The listeners are bound synchronously inside construction (only the
+        // accept loops are spawned), so connecting immediately is race-free —
+        // the kernel backlog holds the connection until accept runs.
+        let connect = |addr: &str| {
+            std::net::TcpStream::connect_timeout(
+                &addr.parse().unwrap(),
+                std::time::Duration::from_secs(2),
+            )
+            .unwrap_or_else(|e| panic!("{addr} must accept: {e}"))
+        };
+        // The relay's mesh socket is IPV6_V6ONLY; loopback IPv4 is its own
+        // socket. Both must be up: peers dial the first, in-app nsites the
+        // second.
+        connect("[::1]:4870");
+        connect("127.0.0.1:4870");
+        connect(&format!("[::1]:{}", crate::auth_service::AUTH_PORT));
+        connect("[::1]:24243");
+
+        drop(rt);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
