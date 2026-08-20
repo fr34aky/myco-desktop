@@ -10,7 +10,13 @@
 # dependency. See docs/how-to/build.md.
 [workspace]
 resolver = "2"
-members = ["myco-core", "nsite-deck", "myco-relay", "myco-blossom"]
+members = [
+    "myco-core",
+    "nsite-deck",
+    "myco-relay",
+    "myco-blossom",
+    "desktop/src-tauri",
+]
 
 [workspace.package]
 version = "0.0.1"
