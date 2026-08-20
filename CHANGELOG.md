@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   phone — the Android build selects exactly the previous behavior — but a
   desktop shell can now choose differently. The design lives in
   `docs/design/desktop.md`.
+- The core can now run against a machine's system fips daemon instead of
+  embedding its own node: identity comes from the daemon's key file, node
+  status and peers from its control socket, and the mesh lifecycle stays with
+  systemd. An unreadable key degrades to read-only browsing with the exact
+  permission fix in the error banner. Desktop-only; the phone keeps its
+  embedded node.
 
 ## [0.6.0] - 2026-08-19
 

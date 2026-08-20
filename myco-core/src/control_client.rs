@@ -103,6 +103,20 @@ pub fn is_connected(connectivity: &str) -> bool {
     matches!(connectivity, "connected" | "stale")
 }
 
+/// The node's own status, as Myco consumes it out of a `show_status` row —
+/// identity and mesh shape, not the forwarding counters.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StatusView {
+    /// The node's npub — in daemon mode, the identity everything is bound to.
+    pub npub: String,
+    /// The fips build serving the socket.
+    pub version: String,
+    /// The mesh-effective IPv6 MTU (`transport_mtu - 77`).
+    pub effective_ipv6_mtu: u16,
+    /// The node's own estimate of the mesh population.
+    pub estimated_mesh_size: u64,
+}
+
 /// A client for one control socket path.
 ///
 /// Stateless and cheap to clone: fips's server reads exactly one request per
@@ -175,6 +189,25 @@ impl ControlClient {
                 .to_string()),
             other => Err(format!("unexpected status: {other:?}")),
         }
+    }
+
+    /// The node's own status — the subset Myco renders in daemon mode, where
+    /// this is the only window onto the mesh process.
+    pub async fn show_status(&self) -> Result<StatusView, String> {
+        let data = self.request("show_status", None).await?;
+        let s = |key: &str| {
+            data.get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let n = |key: &str| data.get(key).and_then(Value::as_u64).unwrap_or(0);
+        Ok(StatusView {
+            npub: s("npub"),
+            version: s("version"),
+            effective_ipv6_mtu: n("effective_ipv6_mtu") as u16,
+            estimated_mesh_size: n("estimated_mesh_size"),
+        })
     }
 
     /// The node's currently authenticated peers.

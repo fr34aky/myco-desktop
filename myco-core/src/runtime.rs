@@ -191,6 +191,24 @@ impl RuntimeConfig {
     }
 }
 
+/// Last `show_status` snapshot from the system daemon (daemon backend only).
+/// Written by the 8s tick (a detached task with no `&mut self`), read
+/// synchronously by `state()` — the same pattern as the peer cache.
+#[derive(Clone, Debug, Default)]
+struct DaemonStatus {
+    /// Whether the last query succeeded — the daemon-mode meaning of
+    /// "node running".
+    reachable: bool,
+    /// Human-readable status line for the UI.
+    status_text: String,
+    /// The daemon's effective IPv6 MTU, 0 until the first successful query.
+    mtu: u16,
+}
+
+/// What `StartNode`/`StopNode` say in daemon mode instead of acting.
+const DAEMON_LIFECYCLE_HINT: &str =
+    "the mesh is managed by the system fips daemon — use systemctl to start or stop it";
+
 /// The app runtime behind the FFI. Owns the device identity, a multi-thread
 /// Tokio runtime, and the embedded fips node. A `Mutex<AppRuntime>` is what the
 /// opaque JNI handle wraps (see `jni_abi`); on the host it is driven directly.
@@ -268,6 +286,10 @@ pub struct AppRuntime {
     /// running on the FFI thread. `None` only on a startup error, in which case
     /// attempts simply have no persistence — never an `AppState.error`.
     attempt_store: Option<Arc<crate::attempt_store::AttemptStore>>,
+    /// `Some` iff the backend is [`MeshBackend::Daemon`]: the 8s tick's
+    /// `show_status` snapshot, which `state()` renders as the node status.
+    /// Doubles as the "am I in daemon mode" flag for the lifecycle guards.
+    daemon_status: Option<Arc<std::sync::Mutex<DaemonStatus>>>,
 }
 
 impl AppRuntime {
@@ -291,23 +313,54 @@ impl AppRuntime {
     fn try_with_config(config: RuntimeConfig) -> anyhow::Result<Self> {
         let data_dir: &str = &config.data_dir;
         let app_version: &str = &config.app_version;
-        if let MeshBackend::Daemon { .. } = config.backend {
-            // The daemon backend arrives with the desktop app (PR3 of
-            // docs/design/desktop.md); until then constructing it is a clear
-            // error rather than a half-working runtime.
-            anyhow::bail!("the daemon mesh backend is not implemented yet");
-        }
         std::fs::create_dir_all(Path::new(data_dir))?;
 
         // Multi-thread runtime so the node's spawned tasks self-drive between
         // FFI polls (see the struct doc).
         let rt = Runtime::new().map_err(|e| anyhow::anyhow!("tokio runtime: {e}"))?;
 
-        let node = Self::build_node(data_dir, false, &config.backend)?;
-        let mut identity = IdentityView::from_identity(node.identity());
-        // FIPS's effective IPv6 MTU (transport_mtu - 77). The VpnService sets this
-        // on the TUN and the MSS clamp derives from it, so packets fit the mesh.
-        identity.fips_mtu = node.effective_ipv6_mtu();
+        // Identity, and (embedded only) the node it belongs to.
+        //
+        // In daemon mode the identity is the *daemon's*: mesh reachability is
+        // bound to its npub — its ULA, its `.fips` name — so content must be
+        // signed with the same key; pairing under any other npub would hand
+        // peers an address that routes to nothing. The key file is root-owned
+        // by default; the documented one-time setup makes it group-readable,
+        // and an unreadable key degrades to a read-only runtime with the fix
+        // in the error banner rather than failing (docs/design/desktop.md).
+        let mut startup_error = String::new();
+        let (node, identity, nsec) = match &config.backend {
+            MeshBackend::Daemon { key_file, .. } => {
+                match identity_store::read_external(key_file) {
+                    Ok(nsec) => {
+                        let id = fips::Identity::from_secret_str(&nsec)
+                            .map_err(|e| anyhow::anyhow!("daemon key: {e}"))?;
+                        // fips_mtu stays 0 here; the daemon's show_status tick
+                        // supplies it (state() overrides from the cache).
+                        (None, IdentityView::from_identity(&id), Some(nsec))
+                    }
+                    Err(e) => {
+                        let kf = key_file.display();
+                        startup_error = format!(
+                            "Cannot read the daemon identity key: {e}. Browsing \
+                             works; pairing and publishing are disabled. Fix: \
+                             sudo chgrp fips {kf} && sudo chmod 0640 {kf}"
+                        );
+                        (None, IdentityView::default(), None)
+                    }
+                }
+            }
+            MeshBackend::Embedded { .. } => {
+                let node = Self::build_node(data_dir, false, &config.backend)?;
+                let mut identity = IdentityView::from_identity(node.identity());
+                // FIPS's effective IPv6 MTU (transport_mtu - 77). The VpnService
+                // sets this on the TUN and the MSS clamp derives from it, so
+                // packets fit the mesh.
+                identity.fips_mtu = node.effective_ipv6_mtu();
+                let nsec = identity_store::load_or_generate(Path::new(data_dir)).ok();
+                (Some(node), identity, nsec)
+            }
+        };
 
         // The content layer (relay + Blossom + gateway + Library) lives for the
         // whole process; it is independent of the node's start/stop lifecycle.
@@ -332,10 +385,11 @@ impl AppRuntime {
             custom_blobs,
         )?);
 
-        // The device keypair (same nsec the node uses) is the pairing identity —
-        // pair request/accept events are signed with it.
-        if let Ok(nsec) = identity_store::load_or_generate(Path::new(data_dir)) {
-            content.set_device_keys(&nsec);
+        // The device keypair (the same nsec the node — or the daemon — uses) is
+        // the pairing identity: pair request/accept events are signed with it.
+        // None only in degraded daemon mode, where content stays read-only.
+        if let Some(nsec) = &nsec {
+            content.set_device_keys(nsec);
         }
 
         // Install the IP online-fallback pull source so a pasted nsite link can
@@ -360,7 +414,13 @@ impl AppRuntime {
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let peer_feed: Arc<std::sync::Mutex<PeerFeedHealth>> =
             Arc::new(std::sync::Mutex::new(PeerFeedHealth::default()));
-        let node_live = Arc::new(AtomicBool::new(false));
+        // In daemon mode the control socket belongs to the system daemon and
+        // exists independently of anything this process does, so the tick may
+        // query from the start; embedded stays false until StartNode.
+        let is_daemon = matches!(config.backend, MeshBackend::Daemon { .. });
+        let node_live = Arc::new(AtomicBool::new(is_daemon));
+        let daemon_status =
+            is_daemon.then(|| Arc::new(std::sync::Mutex::new(DaemonStatus::default())));
 
         // Serve the relay + Blossom over the mesh so paired peers can pull this
         // device's nsites at ws://<npub>.fips:4870 / http://<npub>.fips:24243.
@@ -504,88 +564,120 @@ impl AppRuntime {
                     mesh_warning.push_str(&format!("blossom port 24243 unavailable: {e}"));
                 }
             }
+        }
 
-            // Keepwarm: proactively hold a live relay connection to every Circle
-            // member (respawn a dropped one promptly, not lazily on the next send)
-            // and resubscribe on each peer's reconnect edge. This is what restores a
-            // Circle relay link *mutually and fast* after a mid-chain node flaps —
-            // independent of chat traffic and of where the peer sits in the mesh.
-            //
-            // The tick also feeds the node's connected-peer view into the content
-            // layer and drives not-ready-site retries. state() does the same at
-            // 1Hz for foreground snappiness, but its poll pauses when the app is
-            // backgrounded — this loop is what keeps peer-driven relay sync alive
-            // then.
-            let control = crate::control_client::ControlClient::new(
-                crate::control_client::socket_path(data_dir),
-            );
+        // Keepwarm: proactively hold a live relay connection to every Circle
+        // member (respawn a dropped one promptly, not lazily on the next send)
+        // and resubscribe on each peer's reconnect edge. This is what restores a
+        // Circle relay link *mutually and fast* after a mid-chain node flaps —
+        // independent of chat traffic and of where the peer sits in the mesh.
+        //
+        // The tick also feeds the node's connected-peer view into the content
+        // layer and drives not-ready-site retries. state() does the same at
+        // 1Hz for foreground snappiness, but its poll pauses when the app is
+        // backgrounded — this loop is what keeps peer-driven relay sync alive
+        // then.
+        //
+        // The tick and the drainer run for every backend — they watch whichever
+        // control socket the backend names: the embedded node's app-private one,
+        // or the system daemon's. (Content servers, above, are a separate
+        // concern and separately gated.)
+        let control = crate::control_client::ControlClient::new(match &config.backend {
+            MeshBackend::Daemon { control_socket, .. } => {
+                control_socket.to_string_lossy().into_owned()
+            }
+            MeshBackend::Embedded { .. } => crate::control_client::socket_path(data_dir),
+        });
 
-            // Platform-discovered peers (Wi-Fi Aware, the AP lane) reach the
-            // node over the same socket. The Kotlin radios push into a bounded
-            // queue from their own callback threads; this task owns the client
-            // and issues `connect`. Spawned once for the process, so it spans
-            // node rebuilds and the window before the first StartNode.
-            crate::platform_peers::spawn_drainer(&rt, control.clone(), node_live.clone());
+        // Platform-discovered peers (Wi-Fi Aware, the AP lane) reach the
+        // node over the same socket. The platform radios push into a bounded
+        // queue from their own callback threads; this task owns the client
+        // and issues `connect`. Spawned once for the process, so it spans
+        // node rebuilds and the window before the first StartNode.
+        crate::platform_peers::spawn_drainer(&rt, control.clone(), node_live.clone());
 
-            {
-                let content = content.clone();
-                let peer_cache = peer_cache.clone();
-                let peer_feed = peer_feed.clone();
-                let node_live = node_live.clone();
-                rt.spawn(async move {
-                    let mut tick = tokio::time::interval(std::time::Duration::from_secs(8));
-                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                    loop {
-                        tick.tick().await;
-                        // Nothing binds the socket until the node's rx loop is
-                        // up; querying before then would only manufacture
-                        // failures for the health counter to shout about.
-                        if node_live.load(Ordering::Relaxed) {
-                            match control.show_peers().await {
-                                Ok(peers) => {
-                                    let connected: Vec<String> = peers
-                                        .iter()
-                                        .filter(|p| p.connected && !p.npub.is_empty())
-                                        .map(|p| p.npub.clone())
-                                        .collect();
-                                    *peer_cache.lock().unwrap() = peers;
-                                    {
-                                        let mut health = peer_feed.lock().unwrap();
-                                        health.consecutive_failures = 0;
-                                        health.last_error.clear();
-                                    }
-                                    content.set_connected_peers(connected);
-                                    if !content.circle_npubs().is_empty() {
-                                        for addr in content.retriable_library_addrs() {
-                                            let content = content.clone();
-                                            tokio::spawn(async move {
-                                                content.open_site(addr, None).await
-                                            });
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    // The last snapshot is deliberately kept:
-                                    // stale peer rows plus a visible error beat
-                                    // an empty list that reads as a quiet room.
-                                    let mut health = peer_feed.lock().unwrap();
-                                    health.consecutive_failures =
-                                        health.consecutive_failures.saturating_add(1);
-                                    health.last_error = e.clone();
-                                    let n = health.consecutive_failures;
-                                    drop(health);
-                                    tracing::warn!(
-                                        error = %e,
-                                        consecutive_failures = n,
-                                        "peer state query failed"
-                                    );
-                                }
+        {
+            let content = content.clone();
+            let peer_cache = peer_cache.clone();
+            let peer_feed = peer_feed.clone();
+            let node_live = node_live.clone();
+            let daemon_status = daemon_status.clone();
+            rt.spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(8));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tick.tick().await;
+                    // Daemon mode: the status snapshot is the node status the
+                    // UI renders, and its MTU fills the identity view. A
+                    // failure here is visible as "daemon unreachable" — the
+                    // peer-feed health below shouts about the same outage.
+                    if let Some(slot) = &daemon_status {
+                        match control.show_status().await {
+                            Ok(s) => {
+                                *slot.lock().unwrap() = DaemonStatus {
+                                    reachable: true,
+                                    status_text: format!(
+                                        "system fips daemon {} (mesh ≈{} nodes)",
+                                        s.version, s.estimated_mesh_size
+                                    ),
+                                    mtu: s.effective_ipv6_mtu,
+                                };
+                            }
+                            Err(e) => {
+                                let mut d = slot.lock().unwrap();
+                                d.reachable = false;
+                                d.status_text = format!("system fips daemon unreachable: {e}");
                             }
                         }
-                        content.keepwarm_tick();
                     }
-                });
-            }
+                    // Nothing binds the socket until the node's rx loop is
+                    // up; querying before then would only manufacture
+                    // failures for the health counter to shout about.
+                    if node_live.load(Ordering::Relaxed) {
+                        match control.show_peers().await {
+                            Ok(peers) => {
+                                let connected: Vec<String> = peers
+                                    .iter()
+                                    .filter(|p| p.connected && !p.npub.is_empty())
+                                    .map(|p| p.npub.clone())
+                                    .collect();
+                                *peer_cache.lock().unwrap() = peers;
+                                {
+                                    let mut health = peer_feed.lock().unwrap();
+                                    health.consecutive_failures = 0;
+                                    health.last_error.clear();
+                                }
+                                content.set_connected_peers(connected);
+                                if !content.circle_npubs().is_empty() {
+                                    for addr in content.retriable_library_addrs() {
+                                        let content = content.clone();
+                                        tokio::spawn(
+                                            async move { content.open_site(addr, None).await },
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                // The last snapshot is deliberately kept:
+                                // stale peer rows plus a visible error beat
+                                // an empty list that reads as a quiet room.
+                                let mut health = peer_feed.lock().unwrap();
+                                health.consecutive_failures =
+                                    health.consecutive_failures.saturating_add(1);
+                                health.last_error = e.clone();
+                                let n = health.consecutive_failures;
+                                drop(health);
+                                tracing::warn!(
+                                    error = %e,
+                                    consecutive_failures = n,
+                                    "peer state query failed"
+                                );
+                            }
+                        }
+                    }
+                    content.keepwarm_tick();
+                }
+            });
         }
 
         Ok(Self {
@@ -595,14 +687,29 @@ impl AppRuntime {
             pending_relay_url: settings.relay_url().unwrap_or_default(),
             pending_blossom_url: settings.blossom_url().unwrap_or_default(),
             rev: 0,
-            error: mesh_warning,
+            error: {
+                // A degraded daemon identity and a failed server bind can both
+                // happen; the banner carries whichever exist.
+                if startup_error.is_empty() {
+                    mesh_warning
+                } else if mesh_warning.is_empty() {
+                    startup_error
+                } else {
+                    format!("{startup_error}; {mesh_warning}")
+                }
+            },
             identity,
             ble_enabled: false,
             wifi_aware_enabled: false,
             node_running: false,
-            node_status: "fips node constructed (not started)".to_string(),
+            node_status: if is_daemon {
+                // Rendered until the first show_status tick answers.
+                "waiting for the system fips daemon".to_string()
+            } else {
+                "fips node constructed (not started)".to_string()
+            },
             rt: Some(rt),
-            node: Some(node),
+            node,
             node_live,
             loop_task: None,
             shutdown_tx: None,
@@ -617,6 +724,7 @@ impl AppRuntime {
             attempt_store: Some(Arc::new(crate::attempt_store::AttemptStore::load(
                 Path::new(data_dir),
             ))),
+            daemon_status,
         })
     }
 
@@ -778,6 +886,7 @@ impl AppRuntime {
             // No valid data dir on this path, so there is nowhere to persist to.
             // Attempts still render live; they just do not survive a restart.
             attempt_store: None,
+            daemon_status: None,
         }
     }
 
@@ -1154,6 +1263,15 @@ impl AppRuntime {
     }
 
     fn start_node(&mut self) {
+        // Daemon mode has no in-process node to start; the lifecycle belongs
+        // to systemd. The action still lands (a toggle exists in the UI), so
+        // answer with the hint rather than doing nothing silently. It goes
+        // into the status slot, where the next tick's real status naturally
+        // replaces it.
+        if let Some(slot) = &self.daemon_status {
+            slot.lock().unwrap().status_text = DAEMON_LIFECYCLE_HINT.to_string();
+            return;
+        }
         // A loop task that has already finished on its own — `node.start()`
         // failed, or the packet channel closed — otherwise leaves
         // `node_running` stuck true and the mesh permanently down, with no way
@@ -1313,6 +1431,11 @@ impl AppRuntime {
     /// clears [`Self::stopping`], and `poll_pending_start` replays the queued
     /// start when it does.
     fn stop_node(&mut self) {
+        // Daemon mode: see start_node — the mesh lifecycle is systemd's.
+        if let Some(slot) = &self.daemon_status {
+            slot.lock().unwrap().status_text = DAEMON_LIFECYCLE_HINT.to_string();
+            return;
+        }
         // An explicit stop cancels a start that was queued behind an earlier one.
         self.start_pending = false;
         // Ask the rx loop to drain. Dropping the sender would do it too; sending
@@ -1509,24 +1632,53 @@ impl AppRuntime {
             }
         }
 
+        // Daemon mode renders the daemon's own status snapshot as the node,
+        // and fills the identity's MTU from it (there is no in-process node to
+        // read either from).
+        let daemon = self
+            .daemon_status
+            .as_ref()
+            .map(|slot| slot.lock().unwrap().clone());
+
         AppState {
             rev: self.rev,
             error: self.error_with_feed_health(),
             app_version: self.app_version.clone(),
-            identity: self.identity.clone(),
-            node: NodeStatus {
-                running: self.node_running,
-                // The drain is a real, visible state: the node is neither
-                // running nor yet gone, and a queued start is waiting on it.
-                // Saying so beats a flat "stopped" that the toggle contradicts.
-                status_text: if self.stopping.load(Ordering::Acquire) {
-                    if self.start_pending {
-                        "restarting (draining the previous node)".to_string()
-                    } else {
-                        "stopping (draining)".to_string()
+            identity: {
+                let mut id = self.identity.clone();
+                if let Some(d) = &daemon {
+                    if d.mtu > 0 {
+                        id.fips_mtu = d.mtu;
                     }
-                } else {
-                    self.node_status.clone()
+                }
+                id
+            },
+            node: match &daemon {
+                Some(d) => NodeStatus {
+                    running: d.reachable,
+                    status_text: if d.status_text.is_empty() {
+                        // No tick has answered yet; the constructed-state text
+                        // still stands.
+                        self.node_status.clone()
+                    } else {
+                        d.status_text.clone()
+                    },
+                },
+                None => NodeStatus {
+                    running: self.node_running,
+                    // The drain is a real, visible state: the node is neither
+                    // running nor yet gone, and a queued start is waiting on it.
+                    // Saying so beats a flat "stopped" that the toggle
+                    // contradicts.
+                    status_text: if self.stopping.load(Ordering::Acquire) {
+                        if self.start_pending {
+                            "restarting (draining the previous node)".to_string()
+                        } else {
+                            "stopping (draining)".to_string()
+                        }
+                    } else {
+                        self.node_status.clone()
+                    },
                 },
             },
             ble: {
@@ -2193,6 +2345,160 @@ mod tests {
         connect("127.0.0.1:4870");
         connect(&format!("[::1]:{}", crate::auth_service::AUTH_PORT));
         connect("[::1]:24243");
+
+        drop(rt);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stand-in for the system fips daemon: answers `show_status` and
+    /// `show_peers` in the daemon's own NDJSON envelope on a Unix socket.
+    /// The accept loop parks on the leaked listener when the test ends.
+    fn spawn_fake_daemon(socket: std::path::PathBuf) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind fake daemon");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                let mut line = String::new();
+                if BufReader::new(&stream).read_line(&mut line).is_err() {
+                    continue;
+                }
+                let cmd = serde_json::from_str::<serde_json::Value>(line.trim())
+                    .ok()
+                    .and_then(|v| v.get("command")?.as_str().map(String::from))
+                    .unwrap_or_default();
+                let resp = match cmd.as_str() {
+                    "show_status" => serde_json::json!({"status":"ok","data":{
+                        "npub": "npub1fakedaemon",
+                        "version": "9.9.9-test",
+                        "effective_ipv6_mtu": 1203,
+                        "estimated_mesh_size": 42,
+                    }}),
+                    "show_peers" => serde_json::json!({"status":"ok","data":{"peers":[{
+                        "node_addr": "aa11",
+                        "npub": "npub1peer",
+                        "connectivity": "connected",
+                        "last_seen_ms": 1,
+                        "authenticated_at_ms": 1,
+                        "transport_type": "udp",
+                    }]}}),
+                    other => {
+                        serde_json::json!({"status":"error","message": format!("unknown: {other}")})
+                    }
+                };
+                let mut w = &stream;
+                let _ = writeln!(w, "{resp}");
+            }
+        });
+    }
+
+    /// Daemon mode end to end against a fake daemon socket: the identity comes
+    /// from the key file, the node status and MTU from `show_status`, the peer
+    /// rows from `show_peers` — and the lifecycle actions answer with the
+    /// systemd hint instead of building a node.
+    #[test]
+    fn daemon_mode_reads_identity_status_and_peers() {
+        let dir = temp_dir("daemon-mode");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let socket = dir.join("fake-daemon.sock");
+        spawn_fake_daemon(socket.clone());
+
+        // The "daemon's" key: a fresh identity written the way fips stores it —
+        // a bare bech32 nsec.
+        let id = fips::Identity::generate();
+        let key_file = dir.join("daemon.key");
+        std::fs::write(&key_file, fips::encode_nsec(&id.keypair().secret_key())).unwrap();
+
+        let mut rt = AppRuntime::with_config(RuntimeConfig {
+            data_dir: dir.to_str().unwrap().to_string(),
+            app_version: "test".to_string(),
+            backend: MeshBackend::Daemon {
+                control_socket: socket,
+                key_file,
+            },
+            start_content_servers: false,
+        });
+
+        let state = rt.state();
+        assert_eq!(
+            state.identity.own_npub,
+            id.npub(),
+            "the identity must be the daemon key's npub"
+        );
+        assert_eq!(state.error, "", "a readable key must not raise the banner");
+
+        // The first tick fires immediately; give it a few seconds of slack.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let state = loop {
+            let s = rt.state();
+            if s.node.running && !s.ble_peers.is_empty() {
+                break s;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "status and peers must arrive from the fake daemon; last: running={} peers={} status={:?}",
+                s.node.running,
+                s.ble_peers.len(),
+                s.node.status_text
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert!(
+            state.node.status_text.contains("9.9.9-test"),
+            "the daemon's version must reach the status line: {:?}",
+            state.node.status_text
+        );
+        assert_eq!(
+            state.identity.fips_mtu, 1203,
+            "the identity MTU must come from show_status"
+        );
+        assert_eq!(state.ble_peers[0].npub, "npub1peer");
+
+        // Lifecycle actions are hints, not node operations.
+        rt.dispatch(NativeAppAction::StartNode);
+        assert_eq!(rt.state().node.status_text, DAEMON_LIFECYCLE_HINT);
+        rt.dispatch(NativeAppAction::StopNode);
+        assert_eq!(rt.state().node.status_text, DAEMON_LIFECYCLE_HINT);
+
+        drop(rt);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unreadable daemon key must not fail construction: browsing works,
+    /// the banner carries the exact permission fix, and the identity stays
+    /// empty rather than inventing a keypair the mesh would not route to.
+    #[test]
+    fn an_unreadable_daemon_key_degrades_to_read_only() {
+        let dir = temp_dir("daemon-degraded");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut rt = AppRuntime::with_config(RuntimeConfig {
+            data_dir: dir.to_str().unwrap().to_string(),
+            app_version: "test".to_string(),
+            backend: MeshBackend::Daemon {
+                control_socket: dir.join("no-daemon.sock"),
+                key_file: dir.join("missing.key"),
+            },
+            start_content_servers: false,
+        });
+
+        let state = rt.state();
+        assert!(
+            state.error.contains("sudo chgrp fips"),
+            "the banner must carry the remediation: {:?}",
+            state.error
+        );
+        assert_eq!(
+            state.identity.own_npub, "",
+            "no identity may be invented in degraded mode"
+        );
+        // The runtime still reduces actions — it is degraded, not dead.
+        let before = state.rev;
+        rt.dispatch(NativeAppAction::Tick);
+        assert!(rt.state().rev > before);
 
         drop(rt);
         let _ = std::fs::remove_dir_all(&dir);
