@@ -1,5 +1,32 @@
 
 
+# Myco Desktop
+
+**This repo is [Myco](https://github.com/Origami74/myco) plus its desktop
+app** — a Linux-first Tauri shell in [`desktop/`](desktop/) that mirrors the
+Android feature set: the Apps grid with each nsite in its own chrome-less
+window, Circle + QR pairing, mesh file sharing with consent, Discover,
+Settings, and the Dev diagnostics. It links `myco-core` directly (no FFI) and
+runs against a system fips daemon when one answers, or embeds its own node —
+BLE, LAN UDP, and its own `fips0` TUN — when none does. Design:
+[`docs/design/desktop.md`](docs/design/desktop.md).
+
+Build (Linux, glibc): the workspace needs a local
+[fips](https://github.com/k0sti/fips) checkout at `reference/fips` (a
+gitignored path dependency — see [`docs/how-to/build.md`](docs/how-to/build.md)
+§4) plus the webkit2gtk/gtk3 dev packages, then:
+
+```sh
+cargo build -p myco-desktop
+./target/debug/myco-desktop
+# embedded mode only, one-time (and after each rebuild):
+sudo desktop/packaging/myco-setup ./target/debug/myco-desktop
+```
+
+The original Android README follows.
+
+---
+
 # Myco
 ![](docs/myco-banner.png)
 
