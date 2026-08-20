@@ -42,6 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Members, invites and incoming requests are all managed from the tab, the
   device gets a memorable rename-able name, and `myco://` links — pair,
   share, or app — open in the running app from anywhere on the system.
+- The desktop rounds out its tabs: Discover suggests the curated trio and
+  lists nsites held by circle peers (pulled straight from the holder over the
+  mesh on click); Settings gains the storage gauge with both delete actions
+  and the mesh-only switch; and the Dev tab shows the full peer diagnostics —
+  states, transports, forensics per peer — plus the speedtest.
 
 ## [0.6.0] - 2026-08-19
 

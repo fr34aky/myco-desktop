@@ -61,7 +61,18 @@ function render(force = false) {
                     state.outboundPairs, state.pendingPairRequests, deviceName, pairSvg],
       render: renderCircle,
     },
-    settings: { slice: () => [state.identity, state.node, state.appVersion], render: renderSettings },
+    discover: {
+      slice: () => [state.discovered, state.library, state.sites],
+      render: renderDiscover,
+    },
+    settings: {
+      slice: () => [state.identity, state.node, state.appVersion, state.cache, state.offlineOnly],
+      render: renderSettings,
+    },
+    dev: {
+      slice: () => [state.peers, state.node, state.identity, state.speedtest, openPeers.size],
+      render: renderDev,
+    },
   }[tab] || { slice: () => [], render: renderPlaceholder };
 
   const key = tab + JSON.stringify(spec.slice());
@@ -187,15 +198,96 @@ function renderCircle() {
   return `<h1>Circle</h1>${me}${waiting}${invitedCard}${members}${nearby}`;
 }
 
+// The trio the phone also suggests — public nsites that pull from the Circle
+// if a peer holds them, else the public fallback.
+const SUGGESTED_APPS = [
+  { title: "bitchat", host: "4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivbitchat" },
+  { title: "ICS", host: "4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivics" },
+  { title: "Dumplings", host: "4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivdumplings" },
+];
+
+function discoverTile(host, title, sub, holder) {
+  const letter = (title || "?").slice(0, 1).toUpperCase();
+  return `<div class="tile" data-host="${esc(host)}" data-title="${esc(title)}"
+              ${holder ? `data-holder="${esc(holder)}"` : ""} title="${esc(host)}">
+    <div class="glyph">
+      <img src="http://${esc(host)}.${GATEWAY}/favicon.ico?nosync=1" alt="" onerror="this.remove()" />
+      <span>${esc(letter)}</span>
+    </div>
+    <div class="title">${esc(title)}</div>
+    ${sub ? `<div class="sub">${esc(sub)}</div>` : ""}
+  </div>`;
+}
+
+function renderDiscover() {
+  const suggested = SUGGESTED_APPS.map((s) => discoverTile(s.host, s.title, "", null)).join("");
+
+  // Not news: a suggested app (offered above) or one already pinned — that
+  // lives on the Apps tab. Same filter the phone applies.
+  const offered = new Set(SUGGESTED_APPS.map((s) => s.host));
+  for (const item of state.library || []) {
+    if (item.pinned) offered.add(item.urlHost);
+  }
+  const around = (state.discovered || []).filter((d) => !offered.has(d.host));
+
+  const aroundTiles = around.length
+    ? around
+        .map((d) =>
+          discoverTile(d.host, d.title || d.host, `held by ${d.holderName || shortNpub(d.holderNpub)}`, d.holderNpub)
+        )
+        .join("")
+    : `<div class="empty">Nothing new from your circle right now.</div>`;
+
+  return `<h1>Discover <button id="discover-refresh" class="ghost-inline">Refresh</button></h1>
+    <h2 class="section">Suggested</h2>
+    <div class="grid">${suggested}</div>
+    <h2 class="section">Around you</h2>
+    ${around.length ? `<div class="grid">${aroundTiles}</div>` : aroundTiles}`;
+}
+
+function fmtBytes(n) {
+  if (!n) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i ? 1 : 0) + " " + units[i];
+}
+
+const STORAGE_CAP = 2_000_000_000;
+
 function renderSettings() {
   const id = state.identity || {};
   const node = state.node || {};
+  const cache = state.cache || {};
+  const used = cache.usedBytes || 0;
+  const pct = Math.min(100, (used / STORAGE_CAP) * 100);
+  const daemonMode = (node.statusText || "").includes("daemon");
   return `<h1>Settings</h1>
     <div class="card">
       <h2>Mesh</h2>
       <div class="kv">
         <span class="k">status</span>
         <span class="v"><span class="dot ${node.running ? "on" : "off"}"></span>${esc(node.statusText)}</span>
+      </div>
+      ${daemonMode
+        ? `<div class="sub" style="margin-top:.5rem">The mesh belongs to the system fips service — start or stop it with <span class="mono">systemctl</span>.</div>`
+        : ""}
+      <label class="toggle-row">
+        <input type="checkbox" id="offline-only" ${state.offlineOnly ? "checked" : ""} />
+        Mesh only — never use public internet relays as a fallback
+      </label>
+    </div>
+    <div class="card">
+      <h2>Storage</h2>
+      <div class="gauge"><div class="gauge-fill" style="width:${pct}%"></div></div>
+      <div class="kv" style="margin-top:.6rem">
+        <span class="k">used</span><span class="v">${fmtBytes(used)} of ${fmtBytes(STORAGE_CAP)}</span>
+        <span class="k">app files</span><span class="v">${cache.blobCount ?? "—"} blobs</span>
+        <span class="k">events</span><span class="v">${cache.relayEvents ?? "—"}</span>
+      </div>
+      <div class="row" style="margin-top:.7rem">
+        <button data-act="wipe-cache" class="ghost">Delete cache</button>
+        <button data-act="wipe-stores" class="ghost danger">Delete all data, including apps</button>
       </div>
     </div>
     <div class="card">
@@ -210,6 +302,91 @@ function renderSettings() {
     <div class="card">
       <h2>About</h2>
       <div class="kv"><span class="k">Myco</span><span class="v">${esc(state.appVersion)}</span></div>
+    </div>`;
+}
+
+// ------------------------------------------------------------------ dev tab
+
+const openPeers = new Set();
+
+const PEER_DOT = {
+  connected: "on",
+  "reachable-via-relay": "on",
+  "seen-unidentified": "warn",
+  "paired-offline": "idle",
+  unreachable: "off",
+};
+
+function agoText(ms) {
+  if (!ms) return "";
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 10) return "now";
+  if (s < 120) return `${s}s ago`;
+  return `${Math.round(s / 60)}m ago`;
+}
+
+function renderDev() {
+  const id = state.identity || {};
+  const node = state.node || {};
+  const peers = state.peers || [];
+  const st = state.speedtest || {};
+
+  const nodeCard = `<div class="card"><h2>Node &amp; fips</h2>
+    <div class="kv">
+      <span class="k">status</span>
+      <span class="v"><span class="dot ${node.running ? "on" : "off"}"></span>${esc(node.statusText)}</span>
+      <span class="k">node addr</span><span class="v mono">${esc(id.nodeAddrHex) || "—"}</span>
+      <span class="k">mesh IPv6</span><span class="v mono">${esc(id.fipsIpv6) || "—"}</span>
+    </div></div>`;
+
+  const rows = peers
+    .map((p) => {
+      const key = p.key || p.npub;
+      const label = p.name || shortNpub(p.npub) || p.bleAddr || "—";
+      const attempts = (p.attempts || [])
+        .slice(-20)
+        .map((a) => {
+          const t = new Date(a.atMs || 0).toTimeString().slice(0, 8);
+          return `<div class="mono sub">${t} ${esc(a.role)} ${a.discoveryMs ?? ""}ms ${esc(a.outcome)}</div>`;
+        })
+        .join("");
+      const speed =
+        st.peerNpub === p.npub
+          ? st.running
+            ? `<span class="sub">testing… ${fmtBytes(st.bytes || 0)}</span>`
+            : st.error
+              ? `<span class="sub bad">${esc(st.error)}</span>`
+              : st.upMbps || st.downMbps
+                ? `<span class="sub">↑${(st.upMbps || 0).toFixed(1)} ↓${(st.downMbps || 0).toFixed(1)} Mbps</span>`
+                : ""
+          : "";
+      return `<details data-peer="${esc(key)}" ${openPeers.has(key) ? "open" : ""}>
+        <summary class="row">
+          <span class="dot ${PEER_DOT[p.state] || "idle"}"></span>
+          <span class="grow">${esc(label)}
+            <span class="sub">${esc(p.transport || "")} · ${esc(p.state)} · ${agoText(p.lastSeenMs)}</span></span>
+          ${p.state === "connected" && p.npub
+            ? `<button data-act="speedtest" data-npub="${esc(p.npub)}">Speedtest</button>`
+            : ""}
+          ${speed}
+        </summary>
+        <div class="forensics">
+          <div class="kv">
+            <span class="k">npub</span><span class="v mono">${esc(p.npub) || "—"}</span>
+            <span class="k">pair state</span><span class="v">${esc(p.pairState) || "—"} ${p.inCircle ? "· in circle" : ""}</span>
+            <span class="k">role</span><span class="v">${esc(p.role) || "—"}</span>
+            <span class="k">rssi / psm</span><span class="v">${p.rssi ?? "—"} / ${p.psm || "—"}</span>
+            <span class="k">send drops</span><span class="v">${p.sendDrops ?? 0}</span>
+          </div>
+          ${attempts ? `<div style="margin-top:.4rem">${attempts}</div>` : ""}
+        </div>
+      </details>`;
+    })
+    .join("");
+
+  return `<h1>Dev</h1>${nodeCard}
+    <div class="card"><h2>Peers (${peers.length})</h2>
+      ${rows || '<div class="empty">No peers observed.</div>'}
     </div>`;
 }
 
@@ -288,6 +465,10 @@ document.getElementById("screen").addEventListener("click", (e) => {
     }
     return;
   }
+  if (e.target.closest("#discover-refresh")) {
+    dispatch({ type: "search_nsites" });
+    return;
+  }
   const act = e.target.closest("button[data-act]");
   if (act) {
     const { act: kind, npub, name } = act.dataset;
@@ -303,10 +484,48 @@ document.getElementById("screen").addEventListener("click", (e) => {
         render(true);
       });
     }
+    if (kind === "speedtest") dispatch({ type: "speedtest_peer", npub });
+    if (kind === "wipe-cache" && confirm("Delete the cache? Files backing pinned apps are kept.")) {
+      dispatch({ type: "wipe_cache" });
+    }
+    if (
+      kind === "wipe-stores" &&
+      confirm("Delete ALL data including apps? Identity and circle are kept. This cannot be undone.")
+    ) {
+      dispatch({ type: "wipe_stores" });
+    }
     return;
   }
   const tile = e.target.closest(".tile[data-host]");
-  if (tile) openApp(tile.dataset.host, tile.dataset.title);
+  if (tile) {
+    const { host, title, holder } = tile.dataset;
+    if (holder) {
+      // Around-you: pull from the circle peer who holds it, then open.
+      dispatch({ type: "open_nsite", link: host, holder });
+      invoke("open_nsite_window", { host, title }).catch((err) => alert("Could not open: " + err));
+    } else {
+      openApp(host, title);
+    }
+  }
+});
+
+// Dev-tab forensics stay open across the 1 Hz re-render.
+document.getElementById("screen").addEventListener(
+  "toggle",
+  (e) => {
+    const details = e.target.closest("details[data-peer]");
+    if (!details) return;
+    if (details.open) openPeers.add(details.dataset.peer);
+    else openPeers.delete(details.dataset.peer);
+  },
+  true
+);
+
+// The mesh-only toggle.
+document.getElementById("screen").addEventListener("change", (e) => {
+  if (e.target.id === "offline-only") {
+    dispatch({ type: "set_offline_only", enabled: e.target.checked });
+  }
 });
 
 document.getElementById("screen").addEventListener("contextmenu", (e) => {
@@ -327,6 +546,8 @@ function activateTab(name) {
     b.classList.toggle("active", b.dataset.tab === name);
   }
   if (name === "circle") refreshPairing();
+  // Entering Discover asks the circle what it holds, like the phone.
+  if (name === "discover") dispatch({ type: "search_nsites" });
   render(true);
 }
 
