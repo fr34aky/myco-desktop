@@ -776,6 +776,20 @@ impl Content {
         range: Option<&str>,
         allow_sync: bool,
     ) -> Vec<u8> {
+        frame_response(&self.gateway_get_page(host, path, range, allow_sync).await)
+    }
+
+    /// [`Self::gateway_get`] with the 503 self-heal applied, unframed — the
+    /// desktop's loopback HTTP server consumes this directly; the framed
+    /// wrappers above encode the same response for the JNI. `allow_sync` has
+    /// the meaning documented on [`Self::gateway_get_framed`].
+    pub async fn gateway_get_page(
+        self: Arc<Self>,
+        host: &str,
+        path: &str,
+        range: Option<&str>,
+        allow_sync: bool,
+    ) -> GatewayResponse {
         let mut resp = self.gateway_get(host, path, range).await;
         // A 503 means the site isn't fully present yet. Replace the generic
         // loading body with the real sync status, and (re)trigger a sync if none
@@ -799,7 +813,7 @@ impl Content {
                 };
             }
         }
-        frame_response(&resp)
+        resp
     }
 
     // --- site entry ---

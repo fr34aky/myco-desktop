@@ -99,6 +99,20 @@ verifies `probe.localhost` resolves to loopback and errors clearly if not.
 - `myco://` deep links via the desktop-file scheme handler +
   single-instance plugin.
 
+## Not napplets (yet)
+
+The Apps grid holds **nsites**: kind 15128/35128 manifests carrying
+`["path", <path>, <sha256>]` tags, rendered as full-page web apps with
+*direct* access to the local relay (`ws://localhost:4870`) and Blossom —
+that is how bitchat does live messaging. **Napplets**
+(github.com/napplet/web) are the sibling kind 35129: iframe-sandboxed apps
+that may not touch relays, storage, or keys directly and reach everything
+through a NIP-5D `postMessage` shell exposing NAP capability domains. Myco
+provides no such shell and does not parse 35129, so napplets are out of
+scope for v1. A post-v1 napplet shell is a natural fit though: the nsite
+window would host the iframe and proxy NAP domains onto the embedded
+relay, Blossom, and the device key.
+
 ## Ports
 
 4870 (relay, mesh + loopback), 24243 (Blossom), the auth port — as on

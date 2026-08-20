@@ -16,3 +16,9 @@ pub fn dispatch(core: State<'_, Core>, action: String) -> String {
 pub fn get_state(core: State<'_, Core>) -> String {
     core.0.lock().unwrap().state_json()
 }
+
+/// Open (or re-focus) the window for one nsite.
+#[tauri::command]
+pub fn open_nsite_window(app: tauri::AppHandle, host: String, title: String) -> Result<(), String> {
+    crate::nsite_windows::open(&app, &host, &title)
+}

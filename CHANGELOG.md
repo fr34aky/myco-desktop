@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   systemd. An unreadable key degrades to read-only browsing with the exact
   permission fix in the error banner. Desktop-only; the phone keeps its
   embedded node.
+- The desktop app opens nsites: each app gets its own window, served from a
+  local gateway at `<host>.localhost:4880` exactly like the phone's in-app
+  pages (same origins, same live relay access, Range requests included).
+  Tiles show real favicons, a right-click menu offers update checks and
+  removal, and an Add tile installs a pasted link.
 
 ## [0.6.0] - 2026-08-19
 

@@ -3206,12 +3206,15 @@ dependencies = [
 name = "myco-desktop"
 version = "0.0.1"
 dependencies = [
+ "axum",
  "dirs",
  "myco-core",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

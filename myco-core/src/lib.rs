@@ -95,5 +95,6 @@ mod tun_bridge_jni;
 pub use action::NativeAppAction;
 pub use content::Content;
 pub use control_client::SYSTEM_SOCKET_PATH;
+pub use nsite_deck::GatewayResponse;
 pub use runtime::{AppRuntime, MeshBackend, RuntimeConfig, TunPolicy};
 pub use state::{AppState, IdentityView, NodeStatus};
