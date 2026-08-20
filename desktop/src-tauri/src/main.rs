@@ -65,10 +65,27 @@ fn main() {
             commands::lanshare_status,
             commands::lanshare_send_files,
             commands::lanshare_decide,
-            commands::ui_log
+            commands::ui_log,
+            commands::backend_info,
+            commands::share_payload,
+            commands::add_launcher_shortcut
         ])
         .setup(|app| {
-            let choice = backend::detect();
+            let choice = match backend::detect() {
+                Ok(choice) => choice,
+                // A refusal (forced backend that cannot work here) is worded
+                // for humans; show it and stop — there is nothing to run.
+                Err(message) => {
+                    use tauri_plugin_dialog::DialogExt;
+                    app.dialog()
+                        .message(&message)
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                        .title("Myco cannot start")
+                        .blocking_show();
+                    eprintln!("myco-desktop: {message}");
+                    std::process::exit(1);
+                }
+            };
             eprintln!("myco-desktop: mesh backend: {choice}");
             let config = choice.runtime_config();
             let pairing = pairing::Pairing::new(&config.data_dir);
@@ -107,8 +124,16 @@ fn main() {
                 share.set_mesh(ipv6.to_string(), fips_addr.to_string());
             }
 
+            // An embedded node is the mesh — bring it up with the app, the
+            // way Android does. (Daemon mode embeds no node; StartNode there
+            // is only the systemd hint.)
+            if matches!(choice, backend::Choice::Embedded { .. }) {
+                runtime.dispatch_json(&serde_json::json!({"type": "start_node"}).to_string());
+            }
+
             app.manage(Core(Mutex::new(runtime)));
             app.manage(pairing);
+            app.manage(choice);
             poll::spawn(tauri::AppHandle::clone(app.handle()));
 
             // A cold start via `xdg-open myco://…` carries the link in argv.

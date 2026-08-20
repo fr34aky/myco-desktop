@@ -147,23 +147,45 @@ impl Pairing {
     /// The current `myco://pair/…` URI, minting and recording a secret if none
     /// is live.
     pub fn pair_uri(&self, npub: &str, name: &str) -> String {
-        let mut current = self.current.lock().unwrap();
-        let secret = current.get_or_insert_with(|| {
-            let secret = new_secret();
-            let now = now_ms();
-            let mut map = self.load_ledger();
-            map.retain(|_, at| now.saturating_sub(*at) <= TTL_MS);
-            map.insert(secret.clone(), now);
-            self.save_ledger(&map);
-            secret
-        });
         let json = serde_json::json!({
             "v": 1,
             "npub": npub,
             "name": name,
-            "secret": secret,
+            "secret": self.current_secret(),
         });
         format!("{PAIR_PREFIX}{}", URL_SAFE_NO_PAD.encode(json.to_string()))
+    }
+
+    /// A share link: the pair payload plus the nsite to open — the scanner
+    /// pairs with this device (same ledgered secret, so the presenter
+    /// auto-accepts) and pulls the app from it. Matches Android's
+    /// `NsiteShare` payload byte-for-byte.
+    pub fn share_uri(&self, npub: &str, name: &str, nsite: &str) -> String {
+        let json = serde_json::json!({
+            "v": 1,
+            "nsite": nsite,
+            "npub": npub,
+            "name": name,
+            "secret": self.current_secret(),
+        });
+        format!("{SHARE_PREFIX}{}", URL_SAFE_NO_PAD.encode(json.to_string()))
+    }
+
+    /// The currently shown single-use secret, minting and ledgering a fresh
+    /// one if none is outstanding.
+    fn current_secret(&self) -> String {
+        let mut current = self.current.lock().unwrap();
+        current
+            .get_or_insert_with(|| {
+                let secret = new_secret();
+                let now = now_ms();
+                let mut map = self.load_ledger();
+                map.retain(|_, at| now.saturating_sub(*at) <= TTL_MS);
+                map.insert(secret.clone(), now);
+                self.save_ledger(&map);
+                secret
+            })
+            .clone()
     }
 
     /// True exactly once per issued, unexpired secret — and rotates the shown
@@ -253,6 +275,32 @@ mod tests {
             panic!()
         };
         assert_ne!(rotated.secret, info.secret, "the code must rotate");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn share_uri_round_trips_and_carries_a_consumable_secret() {
+        let dir = std::env::temp_dir().join(format!("myco-share-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pairing = Pairing::new(&dir);
+
+        let uri = pairing.share_uri("npub1abc", "green sammy", "bitchat.example");
+        assert!(uri.starts_with(SHARE_PREFIX));
+        let Link::Share { nsite, pair } = parse_link(&uri) else {
+            panic!("must parse as a share link: {uri}");
+        };
+        assert_eq!(nsite, "bitchat.example");
+        assert_eq!(pair.npub, "npub1abc");
+        // The share carries the same rotating secret the pair QR shows, so a
+        // scan pairs with presenter-side auto-accept.
+        let pair_uri = pairing.pair_uri("npub1abc", "green sammy");
+        let Link::Pair(info) = parse_link(&pair_uri) else {
+            panic!()
+        };
+        assert_eq!(info.secret, pair.secret);
+        assert!(pairing.consume(&pair.secret));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

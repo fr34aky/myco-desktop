@@ -36,13 +36,24 @@ The desktop runs in one of two modes, selected at startup (`MeshBackend` in
 - **Embedded mode** (fallback for machines without a daemon): a fips node in
   process, as on Android, but with `TunPolicy::SystemTun` (fips creates and
   configures `fips0` itself — requires `CAP_NET_ADMIN`), BLE via fips's own
-  BlueZ backend (no platform radio code at all), and both UDP lanes on.
+  BlueZ backend (no platform radio code at all), and both UDP lanes on. The
+  node starts with the app. The one-time `sudo desktop/packaging/myco-setup
+  <binary>` grants the capability (file capabilities die with the inode —
+  re-run after rebuilds) and installs a systemd-resolved drop-in routing
+  `~fips` lookups to the embedded responder, which binds the fixed
+  `[::1]:5354` in this mode (elsewhere port 0 — nothing external needs it).
+  Without the capability the node starts **TUN-less**: BLE/UDP still carry
+  pairing and sync, but nothing on the machine routes `fd00::/8` or resolves
+  `.fips`; Settings shows the exact remediation line. The local
+  `reference/fips` checkout already carries the BlueZ PSM advertise/learn
+  patches embedded BLE↔Android interop needs (build.md §4, patch 3).
 
 The two **cannot coexist** on one host: one `fd00::/8` route, one BLE PSM
 (a second L2CAP bind fails and the transport marks itself Failed), and fips's
 system-TUN creation deletes an existing `fips0`. Startup probes the system
-control socket; if the user forces embedded mode while a daemon answers, the
-app refuses with an explanation. A daemon starting *after* an embedded node is
+control socket; the automatic choice can be forced (`MYCO_BACKEND` or a
+`backend = "…"` line in `~/.config/myco/desktop.toml`), but forcing embedded
+mode while a daemon answers is refused with a dialog. A daemon starting *after* an embedded node is
 up is a documented limitation, not defended against.
 
 Per-backend data dirs (`~/.local/share/myco/{daemon,embedded}/`) keep the two
@@ -126,6 +137,6 @@ Implemented as a sequence of single-purpose PRs: core config refactor (this
 page's `RuntimeConfig`/`MeshBackend` seam, no behavior change), host content
 plane, daemon backend, desktop scaffold, gateway + nsite windows, Circle +
 pairing + deep links, Discover/Settings/Dev, LAN file share, embedded mode.
-Embedded-mode BLE interop with Android additionally needs the BlueZ
-PSM-advertising patch in the local `reference/fips` checkout (see
-`docs/how-to/build.md` §4).
+Embedded-mode BLE interop with Android rides the BlueZ PSM
+advertise/learn patches the local `reference/fips` checkout already carries
+(see `docs/how-to/build.md` §4, patch 3).

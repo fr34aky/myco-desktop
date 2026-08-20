@@ -215,7 +215,10 @@ instead of the hardwired Linux `BluerIo`), (3) **per-peer PSM advertise/discover
 (every backend advertises its OS-assigned L2CAP PSM and dials the peer's learned PSM,
 replacing the fixed `0x0085` — see [ble-interop.md](../design/ble-interop.md)), and
 (4) a **reused/fixed macOS `BleIo`** (the `bluest` CoreBluetooth backend, for the
-Android↔Mac dev/test pair) — all detailed in §4c. The mechanism is borrowed directly from nostr-vpn:
+Android↔Mac dev/test pair) — all detailed in §4c. The desktop app's embedded mode consumes the same
+checkout through the workspace path dependency — patch (3) is what makes its
+BlueZ BLE interoperate with Android phones; nothing extra needs cherry-picking.
+The mechanism is borrowed directly from nostr-vpn:
 [reference/nostr-vpn/android/app/build.gradle.kts](../../reference/nostr-vpn/android/app/build.gradle.kts)
 reads an env var and emits `--config patch.crates-io.<crate>.path="…"` flags into
 the `cargo ndk` invocation.

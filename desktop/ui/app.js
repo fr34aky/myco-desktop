@@ -43,9 +43,10 @@ function showNextModal() {
     return;
   }
   modalActive = true;
-  const { text, input, yes, no, resolve } = next;
+  const { text, html, input, yes, no, resolve } = next;
   box.innerHTML = `
     <p>${esc(text)}</p>
+    ${html || ""}
     ${input !== undefined ? `<input id="modal-input" type="text" />` : ""}
     <div class="modal-actions">
       ${no ? `<button id="modal-no" class="ghost">${esc(no)}</button>` : ""}
@@ -67,9 +68,9 @@ function showNextModal() {
   if (noBtn) noBtn.onclick = () => settle(false);
 }
 
-function ask(text, { input, yes = "OK", no = "Cancel" } = {}) {
+function ask(text, { html, input, yes = "OK", no = "Cancel" } = {}) {
   return new Promise((resolve) => {
-    modalQueue.push({ text, input, yes, no, resolve });
+    modalQueue.push({ text, html, input, yes, no, resolve });
     if (!modalActive) showNextModal();
   });
 }
@@ -78,6 +79,14 @@ const askConfirm = (text, yes = "OK") => ask(text, { yes }).then((v) => v !== nu
 const askPrompt = (text, initial = "") => ask(text, { input: initial });
 const askInfo = (text) => ask(text, { yes: "OK", no: null });
 let deviceName = "";
+
+// Which mesh backend this instance runs on (daemon / embedded, TUN-less?).
+// Fetched once — the choice is made at startup and never changes.
+let backendInfo = null;
+invoke("backend_info").then((info) => {
+  backendInfo = info;
+  render(true);
+});
 let pairSvg = "";
 let lanshare = null;
 let lanshareMode = "mesh"; // the toggle's selection while stopped
@@ -383,6 +392,12 @@ function renderSettings() {
       ${daemonMode
         ? `<div class="sub" style="margin-top:.5rem">The mesh belongs to the system fips service — start or stop it with <span class="mono">systemctl</span>.</div>`
         : ""}
+      ${backendInfo?.backend === "embedded"
+        ? `<div class="kv"><span class="k">backend</span><span class="v">embedded fips node${backendInfo.tunLess ? " (no TUN)" : ""}</span></div>`
+        : ""}
+      ${backendInfo?.tunLess
+        ? `<div class="banner" style="margin-top:.6rem">The node runs without its TUN — peers reach this device, but nothing here can open <span class="mono">.fips</span> pages or receive mesh file shares. One-time fix (repeat after every rebuild):<br/><span class="mono">sudo desktop/packaging/myco-setup ${esc(backendInfo.binary)}</span><br/>then restart Myco.</div>`
+        : ""}
       <label class="toggle-row">
         <input type="checkbox" id="offline-only" ${state.offlineOnly ? "checked" : ""} />
         Mesh only — never use public internet relays as a fallback
@@ -529,15 +544,34 @@ const menu = document.getElementById("menu");
 function showMenu(x, y, host, title) {
   menu.innerHTML = `
     <button data-act="open">Open</button>
+    <button data-act="share">Share&#8230;</button>
+    <button data-act="launcher">Add to launcher</button>
     <button data-act="update">Check for updates</button>
     <button data-act="remove" class="danger">Remove app</button>`;
   menu.style.left = Math.min(x, window.innerWidth - 200) + "px";
-  menu.style.top = Math.min(y, window.innerHeight - 140) + "px";
+  menu.style.top = Math.min(y, window.innerHeight - 220) + "px";
   menu.classList.remove("hidden");
   menu.onclick = (e) => {
     const act = e.target.closest("button")?.dataset.act;
     menu.classList.add("hidden");
     if (act === "open") openApp(host, title);
+    if (act === "share") {
+      invoke("share_payload", { host })
+        .then((p) =>
+          ask(`Scan with Myco on another device to pair with you and open ${title} — or send the link.`, {
+            html: `<div class="qr">${p.svg}</div>
+                   <input type="text" readonly value="${esc(p.uri)}" onfocus="this.select()" />`,
+            yes: "Done",
+            no: null,
+          })
+        )
+        .catch((e) => askInfo(`Sharing failed: ${e}`));
+    }
+    if (act === "launcher") {
+      invoke("add_launcher_shortcut", { host, title })
+        .then((path) => askInfo(`${title} is in your launcher now (${path}).`))
+        .catch((e) => askInfo(`Failed to add the shortcut: ${e}`));
+    }
     if (act === "update") dispatch({ type: "check_nsite_updates" });
     if (act === "remove") {
       askConfirm(`Remove ${title}? Its files stay cached until the cache is cleared.`, "Remove").then((ok) => {

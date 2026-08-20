@@ -1,0 +1,46 @@
+#!/bin/sh
+# One-time setup for Myco's EMBEDDED mesh mode (machines without a system
+# fips daemon). Run as root:  sudo desktop/packaging/myco-setup <binary>
+#
+# It grants the binary CAP_NET_ADMIN — fips creates and configures the
+# `fips0` TUN itself — and routes `.fips` DNS lookups to the embedded
+# responder ([::1]:5354) via a systemd-resolved drop-in.
+#
+# Re-run the setcap half after every rebuild: file capabilities live on the
+# inode, and cargo writes a fresh binary.
+set -eu
+
+BIN="${1:-}"
+if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+    echo "usage: sudo myco-setup /path/to/myco-desktop" >&2
+    exit 2
+fi
+if [ "$(id -u)" -ne 0 ]; then
+    echo "myco-setup must run as root (sudo or pkexec)" >&2
+    exit 2
+fi
+if systemctl is-active --quiet fips.service 2>/dev/null; then
+    echo "A system fips daemon is running — Myco uses it directly; embedded setup" >&2
+    echo "is not for this machine. (Stop fips.service first if you really mean it.)" >&2
+    exit 1
+fi
+
+setcap cap_net_admin+ep "$BIN"
+echo "granted CAP_NET_ADMIN to $BIN"
+echo "  (re-run this after every rebuild — a fresh binary starts without it)"
+
+if [ -d /run/systemd/resolve ] || systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    mkdir -p /etc/systemd/resolved.conf.d
+    cat > /etc/systemd/resolved.conf.d/myco-fips.conf <<'EOF'
+# Installed by myco-setup: route .fips lookups to the embedded Myco node.
+# Harmless while Myco is closed — .fips names simply fail to resolve.
+[Resolve]
+DNS=[::1]:5354
+Domains=~fips
+EOF
+    systemctl try-restart systemd-resolved 2>/dev/null || true
+    echo "routed .fips DNS to the embedded node ([::1]:5354)"
+else
+    echo "systemd-resolved is not in use — point your resolver's fips. domain" >&2
+    echo "at [::1]:5354 yourself to open .fips pages in a browser." >&2
+fi

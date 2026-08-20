@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The desktop app now runs on machines without a system fips daemon: it
+  embeds a fips node — BLE over BlueZ, both UDP lanes, and (after a one-time
+  `sudo desktop/packaging/myco-setup <binary>`) its own `fips0` TUN plus
+  `.fips` DNS for the whole machine. Without the grant the node runs TUN-less
+  and Settings explains the fix; forcing a backend that cannot work on the
+  machine is refused with a dialog instead of a broken mesh. Apps can now be
+  shared as `myco://share` QR codes and links, and pinned to the desktop
+  launcher.
 - Groundwork for the desktop app: the core runtime is now constructed from an
   explicit configuration (which mesh backend, whether the content servers run)
   instead of platform `#[cfg]`s deciding everything. Nothing changes on the

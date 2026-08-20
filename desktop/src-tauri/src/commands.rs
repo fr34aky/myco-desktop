@@ -151,6 +151,69 @@ pub async fn lanshare_send_files(
     Ok(())
 }
 
+/// Which mesh backend this instance runs on, and whether the embedded node
+/// is degraded to TUN-less — what the Settings screen explains.
+#[tauri::command]
+pub fn backend_info(choice: State<'_, crate::backend::Choice>) -> serde_json::Value {
+    choice.info()
+}
+
+/// The share payload for one installed nsite: a `myco://share` URI (pair
+/// payload + the nsite, presenter auto-accepts) and its QR as SVG.
+#[tauri::command]
+pub fn share_payload(
+    core: State<'_, Core>,
+    pairing: State<'_, crate::pairing::Pairing>,
+    host: String,
+) -> Result<serde_json::Value, String> {
+    let npub = {
+        let mut runtime = core.0.lock().unwrap();
+        let state: serde_json::Value =
+            serde_json::from_str(&runtime.state_json()).map_err(|e| e.to_string())?;
+        state["identity"]["ownNpub"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    };
+    if npub.is_empty() {
+        return Err("no identity yet (degraded mode?)".to_string());
+    }
+    let name = pairing.device_name(&npub);
+    let uri = pairing.share_uri(&npub, &name, &host);
+    let svg = qrcode::QrCode::new(uri.as_bytes())
+        .map_err(|e| e.to_string())?
+        .render()
+        .min_dimensions(260, 260)
+        .dark_color(qrcode::render::svg::Color("#000000"))
+        .light_color(qrcode::render::svg::Color("#ffffff"))
+        .build();
+    Ok(serde_json::json!({ "uri": uri, "svg": svg }))
+}
+
+/// Put one nsite in the desktop launcher: a `.desktop` entry whose Exec is
+/// this binary with the app's `myco://app` link — the single-instance plugin
+/// forwards it into the running shell, a cold start opens the app directly.
+#[tauri::command]
+pub fn add_launcher_shortcut(host: String, title: String) -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let slug: String = host
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let dir = dirs::data_dir().ok_or("no data dir")?.join("applications");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("myco-nsite-{slug}.desktop"));
+    let entry = format!(
+        "[Desktop Entry]\nType=Application\nName={}\nComment=Myco app\n\
+         Exec={} myco://app/{}\nTerminal=false\nCategories=Network;\n",
+        title.replace('\n', " "),
+        exe.display(),
+        host
+    );
+    std::fs::write(&path, entry).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// The webview's console is unreadable in a packaged wry window; the shell
 /// forwards its errors and key diagnostics here so they land in the app log.
 #[tauri::command]

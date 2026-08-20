@@ -51,6 +51,12 @@ const LAN_UDP_PORT: u16 = 4871;
 /// `"[fe80::x%ifindex]:<peer's port>"`; see its `parsePeer`.
 const AWARE_UDP_PORT: u16 = 4872;
 
+/// The embedded `.fips` DNS responder's port when fips owns the system TUN —
+/// the address the system resolver's `~fips` route points at (`[::1]:5354`,
+/// see `desktop/packaging/myco-setup`). App-owned/TUN-less nodes use port 0
+/// instead: nothing outside the process needs to find the responder.
+const EMBEDDED_DNS_PORT: u16 = 5354;
+
 /// Which UDP transport instance a Kotlin radio's lane rides.
 ///
 /// `lane` is the label the radio itself pushes (`AwareRadio` sends `"aware"`,
@@ -748,7 +754,8 @@ impl AppRuntime {
         let mut config = fips::Config::new();
         config.node.identity.nsec = Some(nsec);
         config.node.identity.persistent = true;
-        config.tun.enabled = matches!(tun, TunPolicy::SystemTun);
+        let system_tun = matches!(tun, TunPolicy::SystemTun);
+        config.tun.enabled = system_tun;
         // The built-in `.fips` responder runs, and Myco proxies to it.
         //
         // Android has no system DNS socket to point at the responder — the
@@ -767,8 +774,13 @@ impl AppRuntime {
         //
         // Port 0: the address is read back off the bound socket via
         // `dns_local_addr()`, so the kernel picks and nothing squats on 5354.
+        //
+        // Except with the system TUN (embedded desktop): there the OS
+        // resolver is the caller, and the resolved drop-in that routes
+        // `~fips` queries here (installed by `desktop/packaging/myco-setup`)
+        // can only name a fixed port.
         config.dns.enabled = true;
-        config.dns.port = Some(0);
+        config.dns.port = Some(if system_tun { EMBEDDED_DNS_PORT } else { 0 });
         // The control socket is now load-bearing, not an operator convenience:
         // it carries peer state (`show_peers`, the 8s tick) and every
         // platform-discovered peer push (`connect`). Without it the Wi-Fi Aware

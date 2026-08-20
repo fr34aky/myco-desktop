@@ -4,9 +4,17 @@
 //! route, one BLE PSM, and fips's system-TUN path deletes an existing
 //! `fips0`), so the choice is made once at startup: if the system control
 //! socket answers `show_status`, the daemon owns the mesh and Myco runs
-//! against it; otherwise Myco runs its own (for now transport-less) node.
-//! Each backend keeps its own data dir — the identities differ, and a store
-//! signed by one must never be continued under the other.
+//! against it; otherwise Myco embeds its own node — BLE via fips's BlueZ
+//! backend, both UDP lanes, and the system TUN when the process carries
+//! `CAP_NET_ADMIN` (granted once by `desktop/packaging/myco-setup`; without
+//! it the node runs TUN-less and Settings says how to fix that).
+//!
+//! The automatic choice can be overridden — `MYCO_BACKEND=daemon|embedded`,
+//! or `backend = "daemon"` in `~/.config/myco/desktop.toml` — but never into
+//! a broken shape: forcing embedded while a daemon answers (or daemon while
+//! none does) is refused with an explanation instead of fought out over the
+//! one mesh route. Each backend keeps its own data dir — the identities
+//! differ, and a store signed by one must never be continued under the other.
 
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
@@ -27,13 +35,24 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 pub enum Choice {
     /// A system fips daemon answered — run against it.
     Daemon,
-    /// No daemon: an embedded node with no transports yet. Content browsing
-    /// and the servers work; the packet plane arrives with embedded mode
-    /// proper (TUN + BlueZ BLE, later PR).
-    ContentOnly,
+    /// No daemon: a fips node in this process, as on Android.
+    Embedded {
+        /// Whether the process may create the system TUN (`CAP_NET_ADMIN`).
+        /// Without it the node still runs — BLE and LAN UDP carry pairing and
+        /// sync — but nothing on this machine can route to `fd00::/8` or
+        /// resolve `.fips`, so mesh-mode file sharing and peer-served pages
+        /// are off until `myco-setup` runs.
+        system_tun: bool,
+    },
 }
 
 impl Choice {
+    fn embedded() -> Self {
+        Choice::Embedded {
+            system_tun: has_net_admin(),
+        }
+    }
+
     pub fn runtime_config(&self) -> RuntimeConfig {
         let (backend, dir_tag) = match self {
             Choice::Daemon => (
@@ -43,11 +62,15 @@ impl Choice {
                 },
                 "daemon",
             ),
-            Choice::ContentOnly => (
+            Choice::Embedded { system_tun } => (
                 MeshBackend::Embedded {
-                    ble: false,
-                    lan_udp: false,
-                    tun: TunPolicy::Disabled,
+                    ble: true,
+                    lan_udp: true,
+                    tun: if *system_tun {
+                        TunPolicy::SystemTun
+                    } else {
+                        TunPolicy::Disabled
+                    },
                 },
                 "embedded",
             ),
@@ -59,13 +82,31 @@ impl Choice {
             start_content_servers: true,
         }
     }
+
+    /// What the Settings screen needs to explain this backend.
+    pub fn info(&self) -> serde_json::Value {
+        match self {
+            Choice::Daemon => serde_json::json!({ "backend": "daemon", "tunLess": false }),
+            Choice::Embedded { system_tun } => serde_json::json!({
+                "backend": "embedded",
+                "tunLess": !system_tun,
+                "binary": std::env::current_exe()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| "myco-desktop".into()),
+            }),
+        }
+    }
 }
 
 impl fmt::Display for Choice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Choice::Daemon => write!(f, "system fips daemon ({})", myco_core::SYSTEM_SOCKET_PATH),
-            Choice::ContentOnly => write!(f, "embedded (content only, no transports yet)"),
+            Choice::Embedded { system_tun: true } => write!(f, "embedded fips node (system TUN)"),
+            Choice::Embedded { system_tun: false } => write!(
+                f,
+                "embedded fips node (TUN-less — no CAP_NET_ADMIN; run myco-setup)"
+            ),
         }
     }
 }
@@ -78,18 +119,69 @@ fn data_dir(tag: &str) -> PathBuf {
         .join(tag)
 }
 
-/// Probe the system control socket with one `show_status` round-trip.
-///
-/// A connect alone is not enough — a stale socket file accepts nothing, and a
-/// half-dead daemon that cannot answer its own status is not one to depend
-/// on. Any failure means "no daemon" and the embedded fallback.
-pub fn detect() -> Choice {
-    match probe_daemon() {
-        Ok(()) => Choice::Daemon,
-        Err(e) => {
-            eprintln!("myco-desktop: no system daemon ({e}); using the embedded backend");
-            Choice::ContentOnly
-        }
+/// The backend override, if the user set one: `MYCO_BACKEND` wins, then a
+/// `backend = "…"` line in `~/.config/myco/desktop.toml`. The file is read
+/// by hand — one known key, quoted string, no nesting — deliberately not
+/// worth a TOML dependency until a second setting exists.
+fn forced() -> Option<String> {
+    let value = std::env::var("MYCO_BACKEND").ok().or_else(|| {
+        let path = dirs::config_dir()?.join("myco").join("desktop.toml");
+        let text = std::fs::read_to_string(path).ok()?;
+        text.lines().find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key.trim() == "backend").then(|| value.trim().trim_matches(['"', '\'']).to_string())
+        })
+    })?;
+    let value = value.trim().to_ascii_lowercase();
+    (!value.is_empty() && value != "auto").then_some(value)
+}
+
+/// True when the process may create and configure network devices — the
+/// effective-capability bitmap in `/proc/self/status`, bit `CAP_NET_ADMIN`.
+fn has_net_admin() -> bool {
+    const CAP_NET_ADMIN: u32 = 12;
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            let hex = status.lines().find_map(|l| l.strip_prefix("CapEff:"))?;
+            u64::from_str_radix(hex.trim(), 16).ok()
+        })
+        .is_some_and(|caps| caps & (1 << CAP_NET_ADMIN) != 0)
+}
+
+/// Pick the backend; `Err` is a refusal to start, worded for a dialog.
+pub fn detect() -> Result<Choice, String> {
+    let probe = probe_daemon();
+    match forced().as_deref() {
+        None => Ok(match probe {
+            Ok(()) => Choice::Daemon,
+            Err(e) => {
+                eprintln!("myco-desktop: no system daemon ({e}); using the embedded backend");
+                Choice::embedded()
+            }
+        }),
+        Some("daemon") => probe.map(|()| Choice::Daemon).map_err(|e| {
+            format!(
+                "The backend is forced to \"daemon\", but no system fips daemon answered ({e}).\n\n\
+                 Start it with `systemctl start fips.service`, or remove the override \
+                 (MYCO_BACKEND / the backend line in ~/.config/myco/desktop.toml)."
+            )
+        }),
+        Some("embedded") => match probe {
+            Ok(()) => Err(
+                "The backend is forced to \"embedded\", but a system fips daemon is \
+                 running — the two cannot share one host (one fd00::/8 route, one BLE PSM, and \
+                 fips's TUN setup deletes an existing fips0).\n\n\
+                 Stop the daemon with `systemctl stop fips.service`, or remove the override \
+                 (MYCO_BACKEND / the backend line in ~/.config/myco/desktop.toml)."
+                    .into(),
+            ),
+            Err(_) => Ok(Choice::embedded()),
+        },
+        Some(other) => Err(format!(
+            "Unknown backend override {other:?} — expected \"daemon\", \"embedded\", or \"auto\" \
+             (MYCO_BACKEND / the backend line in ~/.config/myco/desktop.toml)."
+        )),
     }
 }
 
