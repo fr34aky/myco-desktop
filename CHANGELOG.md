@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is still waiting is visible from anywhere in the app and can be cancelled.
   An offer nobody answers gives up after ten minutes instead of waiting forever.
 
+### Changed
+
+- Groundwork for the desktop app: the core runtime is now constructed from an
+  explicit configuration (which mesh backend, whether the content servers run)
+  instead of platform `#[cfg]`s deciding everything. Nothing changes on the
+  phone — the Android build selects exactly the previous behavior — but a
+  desktop shell can now choose differently. The design lives in
+  `docs/design/desktop.md`.
+
 ## [0.6.0] - 2026-08-19
 
 ### Added

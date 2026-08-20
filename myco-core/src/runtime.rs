@@ -104,6 +104,93 @@ struct PeerFeedHealth {
     last_error: String,
 }
 
+/// Who creates and configures the TUN device of an embedded node.
+///
+/// Android is always [`TunPolicy::Disabled`]: the `VpnService` owns the fd and
+/// pumps packets through `tun_bridge`. A desktop embedded node instead lets
+/// fips create and configure the system TUN itself (`fips0`, address, route,
+/// MTU) — which requires `CAP_NET_ADMIN` on the process.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TunPolicy {
+    /// fips creates no TUN. The packet plane, if any, is app-owned.
+    Disabled,
+    /// fips creates and configures the system TUN device itself.
+    SystemTun,
+}
+
+/// Where the mesh comes from.
+///
+/// The Android app and the desktop app in embedded mode run a fips node
+/// in-process; the desktop app on a machine with a system fips daemon talks to
+/// that daemon instead — the two cannot coexist on one host (one `fd00::/8`
+/// route, one BLE PSM, and fips's system-TUN path deletes an existing `fips0`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MeshBackend {
+    /// A fips node embedded in this process.
+    Embedded {
+        /// Configure a BLE transport instance. On Android the injected Kotlin
+        /// radio drives it; on Linux fips's own BlueZ backend does.
+        ble: bool,
+        /// Configure the two named UDP transport instances unconditionally
+        /// (the LAN/`!FIPS` lane and the Aware-port lane).
+        lan_udp: bool,
+        /// Who owns the TUN device.
+        tun: TunPolicy,
+    },
+    /// A system fips daemon reached over its control socket. The daemon owns
+    /// the node, the TUN, and the radios; this process reads peer state, pushes
+    /// peers, and signs content with the daemon's identity key.
+    Daemon {
+        /// The daemon's control socket (typically
+        /// [`crate::control_client::SYSTEM_SOCKET_PATH`]).
+        control_socket: std::path::PathBuf,
+        /// The daemon's identity key file: a bare bech32 nsec, the same format
+        /// `identity_store` persists.
+        key_file: std::path::PathBuf,
+    },
+}
+
+/// Construction-time configuration for [`AppRuntime`].
+///
+/// [`AppRuntime::new`] selects [`RuntimeConfig::platform_default`], which is
+/// bit-for-bit today's behavior on every platform; [`AppRuntime::with_config`]
+/// is the seam the desktop shell uses to choose differently.
+#[derive(Clone, Debug)]
+pub struct RuntimeConfig {
+    /// App-private data dir (stores, identity, control socket for embedded).
+    pub data_dir: String,
+    /// The app's version string, echoed into [`AppState`].
+    pub app_version: String,
+    /// Where the mesh comes from.
+    pub backend: MeshBackend,
+    /// Serve the content plane to peers: the mesh + loopback relay sockets
+    /// (:4870), the auth service, the mesh Blossom (:24243), the platform-peer
+    /// drainer, and the 8s keepwarm/peer tick.
+    pub start_content_servers: bool,
+}
+
+impl RuntimeConfig {
+    /// Today's behavior for this platform, exactly.
+    ///
+    /// Android: an embedded node with BLE + both UDP lanes configured, TUN
+    /// app-owned, content servers on. Host: an embedded node with no
+    /// transports (they arrive on a rebuild when `wifi_aware` is passed) and
+    /// no content servers — the shape every host test drives.
+    pub fn platform_default(data_dir: &str, app_version: &str) -> Self {
+        let on_android = cfg!(target_os = "android");
+        Self {
+            data_dir: data_dir.to_string(),
+            app_version: app_version.to_string(),
+            backend: MeshBackend::Embedded {
+                ble: on_android,
+                lan_udp: on_android,
+                tun: TunPolicy::Disabled,
+            },
+            start_content_servers: on_android,
+        }
+    }
+}
+
 /// The app runtime behind the FFI. Owns the device identity, a multi-thread
 /// Tokio runtime, and the embedded fips node. A `Mutex<AppRuntime>` is what the
 /// opaque JNI handle wraps (see `jni_abi`); on the host it is driven directly.
@@ -117,6 +204,9 @@ pub struct AppRuntime {
     /// App-private data dir, kept so the node can be rebuilt on a BLE off→on
     /// cycle (run_rx_loop consumes the node, so restart needs a fresh one).
     data_dir: String,
+    /// The mesh backend this runtime was constructed with, kept for the same
+    /// reason as `data_dir`: a node rebuild must produce the same shape.
+    backend: MeshBackend,
     rev: u64,
     error: String,
     /// The custom relay URL as last saved — which is what the settings screen
@@ -185,20 +275,35 @@ impl AppRuntime {
     /// captured into [`AppState::error`] so the UI can surface it, mirroring
     /// nostr-vpn's `error_state`.
     pub fn new(data_dir: &str, app_version: &str) -> Self {
-        match Self::try_new(data_dir, app_version) {
+        Self::with_config(RuntimeConfig::platform_default(data_dir, app_version))
+    }
+
+    /// Build the runtime from an explicit [`RuntimeConfig`]. Never panics: a
+    /// startup failure is captured into [`AppState::error`], like [`Self::new`].
+    pub fn with_config(config: RuntimeConfig) -> Self {
+        let app_version = config.app_version.clone();
+        match Self::try_with_config(config) {
             Ok(rt) => rt,
-            Err(e) => Self::from_error(app_version, &e.to_string()),
+            Err(e) => Self::from_error(&app_version, &e.to_string()),
         }
     }
 
-    fn try_new(data_dir: &str, app_version: &str) -> anyhow::Result<Self> {
+    fn try_with_config(config: RuntimeConfig) -> anyhow::Result<Self> {
+        let data_dir: &str = &config.data_dir;
+        let app_version: &str = &config.app_version;
+        if let MeshBackend::Daemon { .. } = config.backend {
+            // The daemon backend arrives with the desktop app (PR3 of
+            // docs/design/desktop.md); until then constructing it is a clear
+            // error rather than a half-working runtime.
+            anyhow::bail!("the daemon mesh backend is not implemented yet");
+        }
         std::fs::create_dir_all(Path::new(data_dir))?;
 
         // Multi-thread runtime so the node's spawned tasks self-drive between
         // FFI polls (see the struct doc).
         let rt = Runtime::new().map_err(|e| anyhow::anyhow!("tokio runtime: {e}"))?;
 
-        let node = Self::build_node(data_dir, false)?;
+        let node = Self::build_node(data_dir, false, &config.backend)?;
         let mut identity = IdentityView::from_identity(node.identity());
         // FIPS's effective IPv6 MTU (transport_mtu - 77). The VpnService sets this
         // on the TUN and the MSS clamp derives from it, so packets fit the mesh.
@@ -265,7 +370,7 @@ impl AppRuntime {
         #[allow(unused_mut)]
         let mut mesh_warning = String::new();
         #[cfg(target_os = "android")]
-        {
+        if config.start_content_servers {
             use std::net::SocketAddr;
             let _guard = rt.enter(); // runtime context for TcpListener::from_std
                                      // The mesh Blossom serves *our own* blobs to peers, so it needs the
@@ -487,6 +592,7 @@ impl AppRuntime {
         Ok(Self {
             app_version: app_version.to_string(),
             data_dir: data_dir.to_string(),
+            backend: config.backend,
             pending_relay_url: settings.relay_url().unwrap_or_default(),
             pending_blossom_url: settings.blossom_url().unwrap_or_default(),
             rev: 0,
@@ -523,12 +629,19 @@ impl AppRuntime {
     /// the Wi-Fi Aware bulk lane's data plane (docs/design/wifi-aware-interop.md).
     /// Deliberately not Android-gated: the identical UDP path is the lane's
     /// dev/test stand-in on a plain LAN.
-    fn build_node(data_dir: &str, wifi_aware: bool) -> anyhow::Result<fips::Node> {
+    fn build_node(
+        data_dir: &str,
+        wifi_aware: bool,
+        backend: &MeshBackend,
+    ) -> anyhow::Result<fips::Node> {
+        let MeshBackend::Embedded { ble, lan_udp, tun } = backend else {
+            anyhow::bail!("build_node called for a backend that embeds no node");
+        };
         let nsec = identity_store::load_or_generate(Path::new(data_dir))?;
         let mut config = fips::Config::new();
         config.node.identity.nsec = Some(nsec);
         config.node.identity.persistent = true;
-        config.tun.enabled = false;
+        config.tun.enabled = matches!(tun, TunPolicy::SystemTun);
         // The built-in `.fips` responder runs, and Myco proxies to it.
         //
         // Android has no system DNS socket to point at the responder — the
@@ -562,11 +675,12 @@ impl AppRuntime {
         config.node.control.enabled = true;
         config.node.control.socket_path = crate::control_client::socket_path(data_dir);
         Self::clear_control_socket(&config.node.control.socket_path);
-        // On Android, configure a BLE transport instance so node.start() brings up
-        // the AndroidIo backend (the Kotlin radio drives it via the injected
-        // bridge). Host builds have no BLE backend, so this is Android-only.
-        #[cfg(target_os = "android")]
-        {
+        // Configure a BLE transport instance so node.start() brings up the
+        // platform's backend: on Android the AndroidIo the injected Kotlin
+        // radio drives, on Linux fips's own BlueZ `BluerIo`. The flag comes
+        // from the backend config — true on Android, false in the host default
+        // (host tests have no radio), true for an embedded desktop node.
+        if *ble {
             config.transports.ble =
                 fips::config::TransportInstances::Single(fips::config::BleConfig {
                     auto_connect: Some(true),
@@ -580,13 +694,14 @@ impl AppRuntime {
         // queue — UDP is not advertised on Nostr and no peer config points
         // here — so `offline_only` semantics survive.
         //
-        // Both are configured UNCONDITIONALLY on Android (like the BLE
-        // transport above), not gated on the Aware toggle: the toggle then
-        // controls only the Kotlin radio (whether peers get pushed), never the
-        // node's transport set — so flipping Wi-Fi Aware never restarts the
-        // node and never disrupts an active BLE link. `wifi_aware` still adds
-        // them on the host for the LAN-based dev/test stand-in.
-        if wifi_aware || cfg!(target_os = "android") {
+        // Both are configured UNCONDITIONALLY on Android (`lan_udp` is true in
+        // the Android default backend, like the BLE flag above), not gated on
+        // the Aware toggle: the toggle then controls only the Kotlin radio
+        // (whether peers get pushed), never the node's transport set — so
+        // flipping Wi-Fi Aware never restarts the node and never disrupts an
+        // active BLE link. `wifi_aware` still adds them on the host for the
+        // LAN-based dev/test stand-in.
+        if wifi_aware || *lan_udp {
             let udp = |port: u16| fips::config::UdpConfig {
                 bind_addr: Some(format!("[::]:{port}")),
                 ..Default::default()
@@ -635,6 +750,12 @@ impl AppRuntime {
         Self {
             app_version: app_version.to_string(),
             data_dir: String::new(),
+            // Nothing rebuilds a node on this path; any embedded shape works.
+            backend: MeshBackend::Embedded {
+                ble: false,
+                lan_udp: false,
+                tun: TunPolicy::Disabled,
+            },
             rev: 0,
             error: msg.to_string(),
             pending_relay_url: String::new(),
@@ -1065,7 +1186,7 @@ impl AppRuntime {
         self.start_pending = false;
         // Rebuild the node if a prior stop consumed it (BLE toggled off then on).
         if self.node.is_none() {
-            match Self::build_node(&self.data_dir, self.wifi_aware_enabled) {
+            match Self::build_node(&self.data_dir, self.wifi_aware_enabled, &self.backend) {
                 Ok(n) => self.node = Some(n),
                 Err(e) => {
                     self.error = format!("rebuild node: {e}");
@@ -1956,8 +2077,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp data dir");
 
-        let node = AppRuntime::build_node(dir.to_str().unwrap(), false)
-            .expect("node builds with a fresh identity");
+        let node = AppRuntime::build_node(
+            dir.to_str().unwrap(),
+            false,
+            &MeshBackend::Embedded {
+                ble: false,
+                lan_udp: false,
+                tun: TunPolicy::Disabled,
+            },
+        )
+        .expect("node builds with a fresh identity");
         let config = node.config();
 
         assert!(

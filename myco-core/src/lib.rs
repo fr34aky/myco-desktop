@@ -97,5 +97,6 @@ mod aware_bridge_jni;
 mod tun_bridge_jni;
 
 pub use action::NativeAppAction;
-pub use runtime::AppRuntime;
+pub use content::Content;
+pub use runtime::{AppRuntime, MeshBackend, RuntimeConfig, TunPolicy};
 pub use state::{AppState, IdentityView, NodeStatus};

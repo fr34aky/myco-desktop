@@ -34,6 +34,12 @@ pub fn socket_path(data_dir: &str) -> String {
     format!("{}/{}", data_dir.trim_end_matches('/'), SOCKET_FILE_NAME)
 }
 
+/// Where a *system* fips daemon's control socket lives (the packaged daemon's
+/// default resolution lands on `/run/fips`). The desktop app's daemon backend
+/// talks to this instead of an app-private socket; access is gated by the
+/// `fips` group.
+pub const SYSTEM_SOCKET_PATH: &str = "/run/fips/control.sock";
+
 /// Matches the 5s both fips's server and its reference client use.
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
