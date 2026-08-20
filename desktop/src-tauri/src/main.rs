@@ -12,6 +12,7 @@ mod backend;
 mod commands;
 mod deeplinks;
 mod gateway_http;
+mod lanshare;
 mod nsite_windows;
 mod pairing;
 mod poll;
@@ -49,6 +50,7 @@ fn main() {
                 let _ = main.set_focus();
             }
         }))
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::dispatch,
             commands::get_state,
@@ -57,7 +59,13 @@ fn main() {
             commands::handle_link,
             commands::invite_peer,
             commands::device_name,
-            commands::rename_device
+            commands::rename_device,
+            commands::lanshare_start,
+            commands::lanshare_stop,
+            commands::lanshare_status,
+            commands::lanshare_send_files,
+            commands::lanshare_decide,
+            commands::ui_log
         ])
         .setup(|app| {
             let choice = backend::detect();
@@ -66,24 +74,37 @@ fn main() {
             let pairing = pairing::Pairing::new(&config.data_dir);
             let mut runtime = AppRuntime::with_config(config);
 
-            // The nsite gateway rides the core's own tokio runtime; without a
-            // content layer (startup error) there is nothing to serve.
+            // The nsite gateway and the LAN share ride the core's own tokio
+            // runtime; without a content layer (startup error) neither runs.
+            let share = std::sync::Arc::new(lanshare::LanShare::default());
             if let Some((content, handle)) = runtime.gateway_context() {
-                gateway_http::spawn(content, handle);
+                gateway_http::spawn(content, handle.clone());
+                share.attach(tauri::AppHandle::clone(app.handle()), handle);
             }
+            app.manage(std::sync::Arc::clone(&share));
 
             // Stamp our memorable name onto outgoing pair events from the
             // start — Android does the same at launch. No-op in degraded
             // daemon mode.
-            let own_npub = serde_json::from_str::<serde_json::Value>(&runtime.state_json())
-                .ok()
-                .and_then(|s| s["identity"]["ownNpub"].as_str().map(str::to_string))
+            let identity = serde_json::from_str::<serde_json::Value>(&runtime.state_json())
+                .map(|s| s["identity"].clone())
                 .unwrap_or_default();
+            let own_npub = identity["ownNpub"].as_str().unwrap_or_default().to_string();
             if !own_npub.is_empty() {
                 let name = pairing.device_name(&own_npub);
                 runtime.dispatch_json(
                     &serde_json::json!({"type": "set_device_name", "name": name}).to_string(),
                 );
+            }
+            // Mesh-mode file sharing binds the mesh ULA and advertises the
+            // .fips name; without an identity (degraded daemon mode) the
+            // share falls back to erroring out with a clear message.
+            let (ipv6, fips_addr) = (
+                identity["fipsIpv6"].as_str().unwrap_or_default(),
+                identity["fipsAddr"].as_str().unwrap_or_default(),
+            );
+            if !ipv6.is_empty() && !fips_addr.is_empty() {
+                share.set_mesh(ipv6.to_string(), fips_addr.to_string());
             }
 
             app.manage(Core(Mutex::new(runtime)));

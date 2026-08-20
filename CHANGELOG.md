@@ -47,6 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mesh on click); Settings gains the storage gauge with both delete actions
   and the mesh-only switch; and the Dev tab shows the full peer diagnostics —
   states, transports, forensics per peer — plus the speedtest.
+- The desktop shares files — the hotspot share without the hotspot: a card on
+  Circle serves the same themed guest page (URL + QR), every transfer still
+  waits for the owner's OK (90 seconds of silence is a no), guests send
+  through the page and receive only what the owner offers, and uploads land
+  in ~/Downloads/Myco. A toggle picks the audience: **mesh only** (the
+  default — the page lives at your `.fips` address and only Myco devices can
+  even connect) or **this network** (anyone on your Wi-Fi, the phone-hotspot
+  audience). Mesh mode also needs the share ports allowed in the fips
+  firewall drop-in, since inbound on fips0 is default-deny.
 
 ## [0.6.0] - 2026-08-19
 

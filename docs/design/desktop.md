@@ -93,9 +93,11 @@ verifies `probe.localhost` resolves to loopback and errors clearly if not.
 - Ported pure logic: the single-use 30-min pair-secret ledger, pending deep
   links (30-day TTL), and the `myco://pair|share|app` payload codecs.
 - Pairing v1 is QR **display** + paste; camera scanning is deferred.
-- LAN file share: the hotspot share's HTTP server/consent-gate/outbox design
-  bound to the LAN address — no AP; guests use the existing Wi-Fi and open
-  the same themed page.
+- File share: the hotspot share's HTTP server/consent-gate/outbox design
+  with a mode toggle — **mesh only** (default: bound to the mesh ULA,
+  advertised as the `.fips` name, Myco devices only; needs the share ports
+  in the fips firewall drop-in) or **this network** (LAN bind, any browser
+  on the Wi-Fi — the phone-hotspot audience). No AP either way.
 - `myco://` deep links via the desktop-file scheme handler +
   single-instance plugin.
 

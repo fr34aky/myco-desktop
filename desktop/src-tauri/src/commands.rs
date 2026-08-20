@@ -94,3 +94,71 @@ pub fn rename_device(
     let action = serde_json::json!({"type": "set_device_name", "name": name.trim()});
     core.0.lock().unwrap().dispatch_json(&action.to_string())
 }
+
+// ---- LAN file share -----------------------------------------------------
+
+use std::sync::Arc;
+
+use crate::lanshare::LanShare;
+
+/// `mode`: "mesh" (default — only fips devices can reach the page) or "lan"
+/// (anyone on the local network, the phone-hotspot audience).
+#[tauri::command]
+pub fn lanshare_start(
+    share: State<'_, Arc<LanShare>>,
+    mode: Option<String>,
+) -> Result<String, String> {
+    if share.is_running() {
+        if let Some(url) = share.status()["url"].as_str() {
+            return Ok(url.to_string());
+        }
+    }
+    let mode = match mode.as_deref() {
+        None | Some("mesh") => crate::lanshare::Mode::Mesh,
+        Some("lan") => crate::lanshare::Mode::Lan,
+        Some(other) => return Err(format!("unknown share mode {other:?}")),
+    };
+    crate::lanshare::server::start(Arc::clone(&share), mode)
+}
+
+#[tauri::command]
+pub fn lanshare_stop(share: State<'_, Arc<LanShare>>) {
+    share.stop();
+}
+
+#[tauri::command]
+pub fn lanshare_status(share: State<'_, Arc<LanShare>>) -> serde_json::Value {
+    share.status()
+}
+
+/// Native file picker → offers for the guest. Async so the blocking dialog
+/// rides a worker, not the UI thread.
+#[tauri::command]
+pub async fn lanshare_send_files(
+    app: tauri::AppHandle,
+    share: State<'_, Arc<LanShare>>,
+) -> Result<(), String> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = app.dialog().file().blocking_pick_files();
+    let paths: Vec<std::path::PathBuf> = picked
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|f| f.into_path().ok())
+        .collect();
+    if !paths.is_empty() {
+        share.add_offers(paths);
+    }
+    Ok(())
+}
+
+/// The webview's console is unreadable in a packaged wry window; the shell
+/// forwards its errors and key diagnostics here so they land in the app log.
+#[tauri::command]
+pub fn ui_log(message: String) {
+    tracing::info!(target: "ui", "{message}");
+}
+
+#[tauri::command]
+pub fn lanshare_decide(share: State<'_, Arc<LanShare>>, id: u64, allow: bool) {
+    share.decide(id, allow);
+}

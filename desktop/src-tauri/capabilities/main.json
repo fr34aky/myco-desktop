@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "The shell window drives the reducer over invoke and renders on pushed events; core:default grants the event listeners (state, pair-rotated, goto, lanshare, transfer-request). Nsite windows are plain web pages and get no capabilities.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

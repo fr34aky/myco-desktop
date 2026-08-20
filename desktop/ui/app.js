@@ -8,13 +8,86 @@
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
+// The webview console is unreadable in a packaged wry window — errors and key
+// diagnostics are forwarded to the app log instead (the `ui_log` command).
+const uiLog = (m) => invoke("ui_log", { message: String(m) }).catch(() => {});
+window.addEventListener("error", (e) =>
+  uiLog(`error: ${e.message} @ ${e.filename}:${e.lineno}`)
+);
+window.addEventListener("unhandledrejection", (e) =>
+  uiLog(`unhandled rejection: ${e.reason}`)
+);
+
 const GATEWAY = "localhost:4880";
 
 let state = null;
 let tab = "apps";
 let lastRenderKey = "";
+
+// ---- in-shell dialogs -----------------------------------------------------
+// wry/WebKitGTK does not reliably implement window.confirm/prompt — a native
+// confirm() can throw or return undefined, silently killing the caller. All
+// questions go through this queue instead: one dialog at a time, oldest
+// first, no dismiss-on-outside-tap (matching the phone's transfer dialog).
+
+const modalQueue = [];
+let modalActive = false;
+
+function showNextModal() {
+  const overlay = document.getElementById("modal-overlay");
+  const box = document.getElementById("modal");
+  const next = modalQueue.shift();
+  if (!next) {
+    modalActive = false;
+    overlay.classList.add("hidden");
+    return;
+  }
+  modalActive = true;
+  const { text, input, yes, no, resolve } = next;
+  box.innerHTML = `
+    <p>${esc(text)}</p>
+    ${input !== undefined ? `<input id="modal-input" type="text" />` : ""}
+    <div class="modal-actions">
+      ${no ? `<button id="modal-no" class="ghost">${esc(no)}</button>` : ""}
+      <button id="modal-yes">${esc(yes)}</button>
+    </div>`;
+  if (input !== undefined) {
+    const field = document.getElementById("modal-input");
+    field.value = input;
+    setTimeout(() => field.focus(), 0);
+  }
+  overlay.classList.remove("hidden");
+  const settle = (ok) => {
+    const value = input !== undefined ? document.getElementById("modal-input").value : true;
+    resolve(ok ? value : null);
+    showNextModal();
+  };
+  document.getElementById("modal-yes").onclick = () => settle(true);
+  const noBtn = document.getElementById("modal-no");
+  if (noBtn) noBtn.onclick = () => settle(false);
+}
+
+function ask(text, { input, yes = "OK", no = "Cancel" } = {}) {
+  return new Promise((resolve) => {
+    modalQueue.push({ text, input, yes, no, resolve });
+    if (!modalActive) showNextModal();
+  });
+}
+
+const askConfirm = (text, yes = "OK") => ask(text, { yes }).then((v) => v !== null);
+const askPrompt = (text, initial = "") => ask(text, { input: initial });
+const askInfo = (text) => ask(text, { yes: "OK", no: null });
 let deviceName = "";
 let pairSvg = "";
+let lanshare = null;
+let lanshareMode = "mesh"; // the toggle's selection while stopped
+
+function refreshLanshare() {
+  invoke("lanshare_status").then((s) => {
+    lanshare = s;
+    render();
+  });
+}
 
 function refreshPairing() {
   invoke("device_name").then((n) => {
@@ -58,7 +131,7 @@ function render(force = false) {
     apps: { slice: () => [state.sites, state.updateCheck], render: renderApps },
     circle: {
       slice: () => [state.circle, state.reachableNpubs, state.blePeers,
-                    state.outboundPairs, state.pendingPairRequests, deviceName, pairSvg],
+                    state.outboundPairs, state.pendingPairRequests, deviceName, pairSvg, lanshare],
       render: renderCircle,
     },
     discover: {
@@ -195,7 +268,45 @@ function renderCircle() {
         .join("")}</div>`
     : "";
 
-  return `<h1>Circle</h1>${me}${waiting}${invitedCard}${members}${nearby}`;
+  return `<h1>Circle</h1>${me}${waiting}${invitedCard}${members}${nearby}${renderLanshare()}`;
+}
+
+function renderLanshare() {
+  const ls = lanshare;
+  if (!ls || !ls.running) {
+    return `<div class="card"><h2>Share files</h2>
+      <label class="toggle-row"><input type="radio" name="ls-mode" value="mesh" ${lanshareMode === "mesh" ? "checked" : ""} />
+        Mesh only — reachable at your .fips address, Myco devices only</label>
+      <label class="toggle-row"><input type="radio" name="ls-mode" value="lan" ${lanshareMode === "lan" ? "checked" : ""} />
+        This network — anyone on your Wi-Fi can open the page</label>
+      <div class="sub" style="margin-top:.5rem">Either way, every transfer waits for your OK here.</div>
+      <div class="row" style="margin-top:.6rem"><button data-act="ls-start">Start sharing</button></div>
+    </div>`;
+  }
+  const offers = (ls.offers || [])
+    .map(
+      (o) => `<div class="row"><span class="grow">${esc(o.name)}</span>
+        <span class="sub">${o.status === "waiting" ? "waiting…" : o.status}</span></div>`
+    )
+    .join("");
+  const received = (ls.received || [])
+    .map((f) => `<div class="row"><span class="grow">${esc(f.name)}</span><span class="sub">received</span></div>`)
+    .join("");
+  const modeLine =
+    ls.mode === "mesh"
+      ? "Mesh only — open it on a device running Myco (your phone resolves .fips addresses)."
+      : "This network — anyone on your Wi-Fi can open the page.";
+  return `<div class="card"><h2>Share files</h2>
+    <div class="kv"><span class="k">page</span><span class="v mono">${esc(ls.url)}</span></div>
+    ${ls.urlSvg ? `<div class="qr" style="margin-top:.6rem">${ls.urlSvg}</div>` : ""}
+    <div class="sub center">${esc(modeLine)}</div>
+    ${offers ? `<h2 style="margin-top:.9rem">Sending</h2>${offers}` : ""}
+    ${received ? `<h2 style="margin-top:.9rem">Received (in ~/Downloads/Myco)</h2>${received}` : ""}
+    <div class="row" style="margin-top:.7rem">
+      <button data-act="ls-send">Send files</button>
+      <button data-act="ls-stop" class="ghost danger">Stop</button>
+    </div>
+  </div>`;
 }
 
 // The trio the phone also suggests — public nsites that pull from the Circle
@@ -409,7 +520,7 @@ function openApp(host, title) {
   // reducer's open_nsite (re)starts a pull for a missing or stale site, so a
   // tile whose sync once failed heals on click instead of 404ing forever.
   dispatch({ type: "open_nsite", link: host });
-  invoke("open_nsite_window", { host, title }).catch((e) => alert("Could not open: " + e));
+  invoke("open_nsite_window", { host, title }).catch((e) => askInfo("Could not open: " + e));
 }
 
 // The context menu lives outside #screen so re-renders can't wipe it.
@@ -428,8 +539,10 @@ function showMenu(x, y, host, title) {
     menu.classList.add("hidden");
     if (act === "open") openApp(host, title);
     if (act === "update") dispatch({ type: "check_nsite_updates" });
-    if (act === "remove" && confirm(`Remove ${title}? Its files stay cached until the cache is cleared.`)) {
-      dispatch({ type: "forget_nsite", link: host });
+    if (act === "remove") {
+      askConfirm(`Remove ${title}? Its files stay cached until the cache is cleared.`, "Remove").then((ok) => {
+        if (ok) dispatch({ type: "forget_nsite", link: host });
+      });
     }
   };
 }
@@ -442,18 +555,20 @@ document.addEventListener("click", (e) => {
 
 document.getElementById("screen").addEventListener("click", (e) => {
   if (e.target.closest("#add-app")) {
-    const link = prompt("Paste an nsite link or host:");
-    if (link && link.trim()) dispatch({ type: "open_nsite", link: link.trim() });
+    askPrompt("Paste an nsite link or host:").then((link) => {
+      if (link && link.trim()) dispatch({ type: "open_nsite", link: link.trim() });
+    });
     return;
   }
   if (e.target.closest("#rename")) {
-    const name = prompt("Device name (what peers see when pairing):", deviceName);
-    if (name && name.trim()) {
-      invoke("rename_device", { name: name.trim() }).then((json) => {
-        state = JSON.parse(json);
-        refreshPairing();
-      });
-    }
+    askPrompt("Device name (what peers see when pairing):", deviceName).then((name) => {
+      if (name && name.trim()) {
+        invoke("rename_device", { name: name.trim() }).then((json) => {
+          state = JSON.parse(json);
+          refreshPairing();
+        });
+      }
+    });
     return;
   }
   if (e.target.closest("#pair-send")) {
@@ -475,8 +590,10 @@ document.getElementById("screen").addEventListener("click", (e) => {
     if (kind === "accept") dispatch({ type: "accept_pair_request", npub, name: name || "" });
     if (kind === "decline") dispatch({ type: "decline_pair_request", npub });
     if (kind === "cancel") dispatch({ type: "cancel_pair_invite", npub });
-    if (kind === "remove" && confirm(`Remove ${name || npub} from your circle?`)) {
-      dispatch({ type: "remove_from_circle", npub });
+    if (kind === "remove") {
+      askConfirm(`Remove ${name || npub} from your circle?`, "Remove").then((ok) => {
+        if (ok) dispatch({ type: "remove_from_circle", npub });
+      });
     }
     if (kind === "invite") {
       invoke("invite_peer", { npub, name: "" }).then((json) => {
@@ -485,14 +602,25 @@ document.getElementById("screen").addEventListener("click", (e) => {
       });
     }
     if (kind === "speedtest") dispatch({ type: "speedtest_peer", npub });
-    if (kind === "wipe-cache" && confirm("Delete the cache? Files backing pinned apps are kept.")) {
-      dispatch({ type: "wipe_cache" });
+    if (kind === "ls-start") {
+      invoke("lanshare_start", { mode: lanshareMode })
+        .then(refreshLanshare)
+        .catch((err) => askInfo("Could not start: " + err));
     }
-    if (
-      kind === "wipe-stores" &&
-      confirm("Delete ALL data including apps? Identity and circle are kept. This cannot be undone.")
-    ) {
-      dispatch({ type: "wipe_stores" });
+    if (kind === "ls-stop") invoke("lanshare_stop").then(refreshLanshare);
+    if (kind === "ls-send") invoke("lanshare_send_files").then(refreshLanshare);
+    if (kind === "wipe-cache") {
+      askConfirm("Delete the cache? Files backing pinned apps are kept.", "Delete").then((ok) => {
+        if (ok) dispatch({ type: "wipe_cache" });
+      });
+    }
+    if (kind === "wipe-stores") {
+      askConfirm(
+        "Delete ALL data including apps? Identity and circle are kept. This cannot be undone.",
+        "Delete everything"
+      ).then((ok) => {
+        if (ok) dispatch({ type: "wipe_stores" });
+      });
     }
     return;
   }
@@ -502,7 +630,7 @@ document.getElementById("screen").addEventListener("click", (e) => {
     if (holder) {
       // Around-you: pull from the circle peer who holds it, then open.
       dispatch({ type: "open_nsite", link: host, holder });
-      invoke("open_nsite_window", { host, title }).catch((err) => alert("Could not open: " + err));
+      invoke("open_nsite_window", { host, title }).catch((err) => askInfo("Could not open: " + err));
     } else {
       openApp(host, title);
     }
@@ -526,6 +654,7 @@ document.getElementById("screen").addEventListener("change", (e) => {
   if (e.target.id === "offline-only") {
     dispatch({ type: "set_offline_only", enabled: e.target.checked });
   }
+  if (e.target.name === "ls-mode") lanshareMode = e.target.value;
 });
 
 document.getElementById("screen").addEventListener("contextmenu", (e) => {
@@ -545,13 +674,21 @@ function activateTab(name) {
   for (const b of document.querySelectorAll("#tabs button")) {
     b.classList.toggle("active", b.dataset.tab === name);
   }
-  if (name === "circle") refreshPairing();
+  if (name === "circle") {
+    refreshPairing();
+    refreshLanshare();
+  }
   // Entering Discover asks the circle what it holds, like the phone.
   if (name === "discover") dispatch({ type: "search_nsites" });
   render(true);
 }
 
+let sawFirstStateEvent = false;
 listen("state", (event) => {
+  if (!sawFirstStateEvent) {
+    sawFirstStateEvent = true;
+    uiLog("first state event received — event delivery works");
+  }
   state = JSON.parse(event.payload);
   render();
 });
@@ -560,10 +697,28 @@ listen("pair-rotated", () => refreshPairing());
 
 listen("goto", (event) => activateTab(event.payload));
 
+listen("lanshare", () => refreshLanshare());
+
+// The owner's half of every transfer: a guest wants to send (or take) a file.
+listen("transfer-request", (event) => {
+  const r = event.payload;
+  uiLog(`transfer-request received: #${r.id} ${r.direction} ${r.name}`);
+  const size = r.size ? ` (${fmtBytes(r.size)})` : "";
+  const text =
+    r.direction === "upload"
+      ? `${r.from || "A guest"} wants to send you "${r.name}"${size}.`
+      : `${r.from || "A guest"} wants to download "${r.name}"${size}.`;
+  ask(text, { yes: "Accept", no: "Decline" }).then((v) => {
+    invoke("lanshare_decide", { id: r.id, allow: v !== null });
+  });
+});
+
 invoke("get_state").then((json) => {
   state = JSON.parse(json);
   render(true);
 });
+
+uiLog("shell ready — all listeners registered");
 
 refreshPairing();
 render();
