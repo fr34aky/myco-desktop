@@ -1,0 +1,14 @@
+# Myco desktop launcher + myco:// scheme handler.
+# Install (user scope):
+#   install -Dm644 app.myco.desktop ~/.local/share/applications/app.myco.desktop
+#   # point Exec= at the real binary path first, then:
+#   update-desktop-database ~/.local/share/applications
+#   xdg-mime default app.myco.desktop x-scheme-handler/myco
+[Desktop Entry]
+Type=Application
+Name=Myco
+Comment=Offline-first peer-to-peer web apps
+Exec=/home/andre/myco-desktop/target/debug/myco-desktop %u
+Terminal=false
+Categories=Network;
+MimeType=x-scheme-handler/myco;

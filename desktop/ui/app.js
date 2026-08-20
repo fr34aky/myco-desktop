@@ -13,6 +13,24 @@ const GATEWAY = "localhost:4880";
 let state = null;
 let tab = "apps";
 let lastRenderKey = "";
+let deviceName = "";
+let pairSvg = "";
+
+function refreshPairing() {
+  invoke("device_name").then((n) => {
+    deviceName = n;
+    render();
+  });
+  invoke("pair_payload")
+    .then((p) => {
+      pairSvg = p.svg;
+      render();
+    })
+    .catch(() => {
+      pairSvg = "";
+      render();
+    });
+}
 
 // ---------------------------------------------------------------- rendering
 
@@ -38,6 +56,11 @@ function render(force = false) {
   }
   const spec = {
     apps: { slice: () => [state.sites, state.updateCheck], render: renderApps },
+    circle: {
+      slice: () => [state.circle, state.reachableNpubs, state.blePeers,
+                    state.outboundPairs, state.pendingPairRequests, deviceName, pairSvg],
+      render: renderCircle,
+    },
     settings: { slice: () => [state.identity, state.node, state.appVersion], render: renderSettings },
   }[tab] || { slice: () => [], render: renderPlaceholder };
 
@@ -78,6 +101,90 @@ function renderApps() {
     .join("");
   const add = `<div class="tile add" id="add-app"><div class="glyph">+</div><div class="title">Add</div></div>`;
   return `<h1>Apps</h1><div class="grid">${tiles}${add}</div>`;
+}
+
+function shortNpub(npub) {
+  return npub && npub.length > 16 ? npub.slice(0, 10) + "…" + npub.slice(-4) : npub || "";
+}
+
+function renderCircle() {
+  const circle = state.circle || [];
+  const reachable = new Set(state.reachableNpubs || []);
+  const inCircle = new Set(circle.map((c) => c.npub));
+  const pending = state.pendingPairRequests || [];
+  const invited = state.outboundPairs || [];
+  const peers = (state.blePeers || []).filter(
+    (p) => p.npub && !inCircle.has(p.npub) && !invited.some((i) => i.npub === p.npub)
+  );
+
+  const me = `<div class="card">
+    <h2>This device</h2>
+    <div class="me-row">
+      <button id="rename" class="chip" title="Rename">${esc(deviceName) || "…"}</button>
+      <span class="sub mono">${esc(shortNpub((state.identity || {}).ownNpub))}</span>
+    </div>
+    ${pairSvg
+      ? `<div class="qr">${pairSvg}</div>
+         <div class="sub center">Scan with your phone's Myco to pair — or paste their code below.</div>`
+      : `<div class="empty">No pairing code (identity unavailable).</div>`}
+    <div class="paste-row">
+      <input id="pair-code" type="text" placeholder="Paste a myco:// code or nsite link" />
+      <button id="pair-send">Go</button>
+    </div>
+  </div>`;
+
+  const waiting = pending.length
+    ? `<div class="card"><h2>Waiting to join</h2>${pending
+        .map(
+          (r) => `<div class="row">
+            <span class="grow">${esc(r.name) || "unnamed"} <span class="sub mono">${esc(shortNpub(r.npub))}</span></span>
+            <button data-act="accept" data-npub="${esc(r.npub)}" data-name="${esc(r.name)}">Accept</button>
+            <button data-act="decline" data-npub="${esc(r.npub)}" class="ghost">Ignore</button>
+          </div>`
+        )
+        .join("")}
+        <div class="sub">Verify the name with the other device before accepting.</div></div>`
+    : "";
+
+  const invitedCard = invited.length
+    ? `<div class="card"><h2>Invited</h2>${invited
+        .map(
+          (i) => `<div class="row">
+            <span class="grow">${esc(i.name) || "unnamed"} <span class="sub mono">${esc(shortNpub(i.npub))}</span></span>
+            <span class="sub">waiting…</span>
+            <button data-act="cancel" data-npub="${esc(i.npub)}" class="ghost">Cancel</button>
+          </div>`
+        )
+        .join("")}</div>`
+    : "";
+
+  const members = `<div class="card"><h2>In your circle (${circle.length})</h2>${
+    circle.length
+      ? circle
+          .map(
+            (c) => `<div class="row">
+              <span class="dot ${reachable.has(c.npub) ? "on" : "off"}"></span>
+              <span class="grow">${esc(c.name) || "unnamed"} <span class="sub mono">${esc(shortNpub(c.npub))}</span></span>
+              <button data-act="remove" data-npub="${esc(c.npub)}" data-name="${esc(c.name)}" class="ghost danger">Remove</button>
+            </div>`
+          )
+          .join("")
+      : '<div class="empty">Nobody yet — pair with your phone via the code above.</div>'
+  }</div>`;
+
+  const nearby = peers.length
+    ? `<div class="card"><h2>Connected peers</h2>${peers
+        .map(
+          (p) => `<div class="row">
+            <span class="dot ${p.connected ? "on" : "off"}"></span>
+            <span class="grow sub mono">${esc(shortNpub(p.npub))}</span>
+            <button data-act="invite" data-npub="${esc(p.npub)}">＋ Invite</button>
+          </div>`
+        )
+        .join("")}</div>`
+    : "";
+
+  return `<h1>Circle</h1>${me}${waiting}${invitedCard}${members}${nearby}`;
 }
 
 function renderSettings() {
@@ -162,6 +269,42 @@ document.getElementById("screen").addEventListener("click", (e) => {
     if (link && link.trim()) dispatch({ type: "open_nsite", link: link.trim() });
     return;
   }
+  if (e.target.closest("#rename")) {
+    const name = prompt("Device name (what peers see when pairing):", deviceName);
+    if (name && name.trim()) {
+      invoke("rename_device", { name: name.trim() }).then((json) => {
+        state = JSON.parse(json);
+        refreshPairing();
+      });
+    }
+    return;
+  }
+  if (e.target.closest("#pair-send")) {
+    const input = document.getElementById("pair-code");
+    const text = (input.value || "").trim();
+    if (text) {
+      invoke("handle_link", { text });
+      input.value = "";
+    }
+    return;
+  }
+  const act = e.target.closest("button[data-act]");
+  if (act) {
+    const { act: kind, npub, name } = act.dataset;
+    if (kind === "accept") dispatch({ type: "accept_pair_request", npub, name: name || "" });
+    if (kind === "decline") dispatch({ type: "decline_pair_request", npub });
+    if (kind === "cancel") dispatch({ type: "cancel_pair_invite", npub });
+    if (kind === "remove" && confirm(`Remove ${name || npub} from your circle?`)) {
+      dispatch({ type: "remove_from_circle", npub });
+    }
+    if (kind === "invite") {
+      invoke("invite_peer", { npub, name: "" }).then((json) => {
+        state = JSON.parse(json);
+        render(true);
+      });
+    }
+    return;
+  }
   const tile = e.target.closest(".tile[data-host]");
   if (tile) openApp(tile.dataset.host, tile.dataset.title);
 });
@@ -175,22 +318,31 @@ document.getElementById("screen").addEventListener("contextmenu", (e) => {
 
 document.getElementById("tabs").addEventListener("click", (e) => {
   const button = e.target.closest("button[data-tab]");
-  if (!button) return;
-  tab = button.dataset.tab;
-  for (const b of document.querySelectorAll("#tabs button")) {
-    b.classList.toggle("active", b === button);
-  }
-  render(true);
+  if (button) activateTab(button.dataset.tab);
 });
+
+function activateTab(name) {
+  tab = name;
+  for (const b of document.querySelectorAll("#tabs button")) {
+    b.classList.toggle("active", b.dataset.tab === name);
+  }
+  if (name === "circle") refreshPairing();
+  render(true);
+}
 
 listen("state", (event) => {
   state = JSON.parse(event.payload);
   render();
 });
 
+listen("pair-rotated", () => refreshPairing());
+
+listen("goto", (event) => activateTab(event.payload));
+
 invoke("get_state").then((json) => {
   state = JSON.parse(json);
   render(true);
 });
 
+refreshPairing();
 render();

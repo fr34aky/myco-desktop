@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pages (same origins, same live relay access, Range requests included).
   Tiles show real favicons, a right-click menu offers update checks and
   removal, and an Add tile installs a pasted link.
+- The desktop grows its Circle: pair with a phone by showing a QR code or
+  pasting a code, with the same one-time-secret auto-accept the phones use
+  between themselves (a scanned code pairs silently and then rotates).
+  Members, invites and incoming requests are all managed from the tab, the
+  device gets a memorable rename-able name, and `myco://` links — pair,
+  share, or app — open in the running app from anywhere on the system.
 
 ## [0.6.0] - 2026-08-19
 
