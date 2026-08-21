@@ -47,6 +47,17 @@ The desktop runs in one of two modes, selected at startup (`MeshBackend` in
   `.fips`; Settings shows the exact remediation line. The local
   `reference/fips` checkout already carries the BlueZ PSM advertise/learn
   patches embedded BLE↔Android interop needs (build.md §4, patch 3).
+- **Same-Wi-Fi lane.** A phone or desktop on the same LAN should be reached
+  over UDP, not BLE (tens of kB/s and a flapping link vs. a LAN). The
+  rendezvous is mDNS `_fips._udp` with the npub in TXT, the advert fips
+  itself defines (`reference/fips` `src/mdns`); the phone both browses and
+  publishes it (`ApRadio`). Embedded mode turns on fips's own LAN rendezvous,
+  **unscoped**, so it advertises and dials. Daemon mode inherits whatever
+  `/etc/fips/fips.yaml` says: the daemon typically advertises with a
+  `scope`, which the phone's browser ignores-by-not-filtering, so the phone
+  dials the daemon and the session lands on UDP either way — but a scoped
+  daemon never dials the phone's unscoped advert itself. Identity is never
+  taken from the advert; the Noise handshake authenticates the peer.
 
 The two **cannot coexist** on one host: one `fd00::/8` route, one BLE PSM
 (a second L2CAP bind fails and the transport marks itself Failed), and fips's

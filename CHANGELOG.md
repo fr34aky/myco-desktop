@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Desktop (embedded mode): a phone on the same Wi-Fi is found over mDNS and
+  dialled over UDP, so transfers and sync stop waiting on Bluetooth when a
+  LAN is available.
 - Desktop: paired file transfer. A paired phone can send a file straight to
   the desktop over the mesh — an Accept/Decline prompt appears, and the file
   lands in `~/Downloads/Myco`. "Send file…" on a Circle contact sends the

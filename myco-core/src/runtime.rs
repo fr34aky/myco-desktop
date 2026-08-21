@@ -834,6 +834,16 @@ impl AppRuntime {
                 .collect(),
             );
         }
+        // On a host, let fips itself advertise and browse `_fips._udp` on the
+        // LAN, so a phone (or another desktop) on the same Wi-Fi is dialled
+        // over UDP instead of waiting for BLE. Unscoped on purpose: the phone's
+        // advert (`ApRadio`) carries no scope, and a scoped browser ignores
+        // it. Not on Android — there the Kotlin radio does both halves, because
+        // fips would pick the UDP socket by instance id and could dial down the
+        // one pinned to the Wi-Fi Aware network.
+        if *lan_udp && !cfg!(target_os = "android") {
+            config.node.rendezvous.lan.enabled = true;
+        }
         fips::Node::new(config).map_err(|e| anyhow::anyhow!("fips Node::new failed: {e}"))
     }
 
@@ -2271,6 +2281,42 @@ mod tests {
             "the default path resolves to /run, $XDG_RUNTIME_DIR or /tmp — none \
              writable by an Android app UID"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A host node with the LAN lane on must also *find* the LAN: fips's mDNS
+    /// rendezvous is opt-in and off by default, and without it a phone on the
+    /// same Wi-Fi is only ever reached over BLE. Unscoped, so the phone's
+    /// scope-less advert is not filtered out. Without the lane there is no
+    /// UDP socket to advertise, so it stays off.
+    #[test]
+    fn the_lan_lane_brings_mdns_rendezvous_with_it_on_a_host() {
+        let dir = temp_dir("lan-rendezvous");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp data dir");
+        let build = |lan_udp: bool| {
+            AppRuntime::build_node(
+                dir.to_str().unwrap(),
+                false,
+                &MeshBackend::Embedded {
+                    ble: false,
+                    lan_udp,
+                    tun: TunPolicy::Disabled,
+                },
+            )
+            .expect("node builds")
+        };
+
+        let with_lan = build(true);
+        assert!(with_lan.config().node.rendezvous.lan.enabled);
+        assert!(
+            with_lan.config().node.rendezvous.lan.scope.is_none(),
+            "a scoped browser ignores the phone's unscoped advert"
+        );
+        drop(with_lan);
+        let without = build(false);
+        assert!(!without.config().node.rendezvous.lan.enabled);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
