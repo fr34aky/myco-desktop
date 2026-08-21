@@ -140,7 +140,8 @@ function render(force = false) {
     apps: { slice: () => [state.sites, state.updateCheck], render: renderApps },
     circle: {
       slice: () => [state.circle, state.reachableNpubs, state.blePeers,
-                    state.outboundPairs, state.pendingPairRequests, deviceName, pairSvg, lanshare],
+                    state.outboundPairs, state.pendingPairRequests, state.fileTransfers,
+                    deviceName, pairSvg, lanshare],
       render: renderCircle,
     },
     discover: {
@@ -258,6 +259,7 @@ function renderCircle() {
             (c) => `<div class="row">
               <span class="dot ${reachable.has(c.npub) ? "on" : "off"}"></span>
               <span class="grow">${esc(c.name) || "unnamed"} <span class="sub mono">${esc(shortNpub(c.npub))}</span></span>
+              <button data-act="send-file" data-npub="${esc(c.npub)}" data-name="${esc(c.name)}" title="Send a file over the mesh">Send file…</button>
               <button data-act="remove" data-npub="${esc(c.npub)}" data-name="${esc(c.name)}" class="ghost danger">Remove</button>
             </div>`
           )
@@ -277,7 +279,77 @@ function renderCircle() {
         .join("")}</div>`
     : "";
 
-  return `<h1>Circle</h1>${me}${waiting}${invitedCard}${members}${nearby}${renderLanshare()}`;
+  return `<h1>Circle</h1>${me}${waiting}${invitedCard}${renderTransfers()}${members}${nearby}${renderLanshare()}`;
+}
+
+// ---- paired file transfer (the core's encrypted mesh transfer, Android #34)
+// Statuses a transfer can still move on from; everything else is terminal.
+const LIVE_TRANSFER = new Set(["offered", "waiting_user", "accepted", "ready", "downloading"]);
+
+function transferLabel(t) {
+  const peer = t.peerName || shortNpub(t.peerNpub) || "peer";
+  const out = t.direction === "outgoing";
+  switch (t.status) {
+    case "offered": return `Waiting for ${peer} to accept`;
+    case "waiting_user": return "Waiting for you to decide";
+    case "accepted": return out ? "Preparing secure transfer" : `Waiting for ${peer}'s file`;
+    case "ready": return `Sending securely to ${peer}`;
+    case "downloading": return `Receiving from ${peer}`;
+    case "completed": return "Done";
+    case "denied": return t.error || "Declined";
+    case "cancelled": return "Cancelled";
+    case "failed": return t.error || "Transfer failed";
+    default: return t.status;
+  }
+}
+
+// Live rows get Cancel; terminal ones Dismiss. Mirrors the phone's Circle tab:
+// a send waiting on an absent peer stays visible here until it resolves.
+function renderTransfers() {
+  const rows = (state.fileTransfers || []).filter(
+    (t) => LIVE_TRANSFER.has(t.status) || ["failed", "denied", "cancelled"].includes(t.status)
+  );
+  if (!rows.length) return "";
+  return `<div class="card"><h2>File transfers</h2>${rows
+    .map((t) => {
+      const live = LIVE_TRANSFER.has(t.status);
+      const arrow = t.direction === "outgoing" ? "↑" : "↓";
+      const decide =
+        t.status === "waiting_user"
+          ? `<button data-act="ft-accept" data-id="${esc(t.id)}">Accept</button>
+             <button data-act="ft-decline" data-id="${esc(t.id)}" class="ghost">Decline</button>`
+          : live
+          ? `<button data-act="ft-cancel" data-id="${esc(t.id)}" class="ghost">Cancel</button>`
+          : `<button data-act="ft-forget" data-id="${esc(t.id)}" class="ghost">Dismiss</button>`;
+      return `<div class="row">
+        <span class="grow">${arrow} ${esc(t.name)} <span class="sub">${t.size ? fmtBytes(t.size) : ""}</span>
+          <div class="sub ${live ? "" : "danger"}">${esc(transferLabel(t))}</div></span>
+        ${decide}
+      </div>`;
+    })
+    .join("")}</div>`;
+}
+
+// Offers already put in front of the user, so a 1 Hz snapshot that still
+// carries the row does not ask again.
+const promptedOffers = new Set();
+
+function promptIncomingOffers() {
+  for (const t of state.fileTransfers || []) {
+    if (t.direction !== "incoming" || t.status !== "waiting_user" || promptedOffers.has(t.id)) continue;
+    promptedOffers.add(t.id);
+    const from = t.peerName || shortNpub(t.peerNpub) || "A paired device";
+    const size = t.size ? ` (${fmtBytes(t.size)})` : "";
+    const html = t.mime ? `<div class="sub center mono">${esc(t.mime)}</div>` : "";
+    uiLog(`file offer received: ${t.id} ${t.name} from ${from}`);
+    ask(`${from} wants to send you "${t.name}"${size}. Save it to ~/Downloads/Myco?`, {
+      html, yes: "Accept", no: "Decline",
+    }).then((v) => {
+      // The offer may have expired or been cancelled while the card was up;
+      // the reducer ignores a decision for a row no longer waiting.
+      dispatch({ type: v !== null ? "accept_file_transfer" : "decline_file_transfer", transferId: t.id });
+    });
+  }
 }
 
 function renderLanshare() {
@@ -311,8 +383,9 @@ function renderLanshare() {
     <div class="sub center">${esc(modeLine)}</div>
     ${offers ? `<h2 style="margin-top:.9rem">Sending</h2>${offers}` : ""}
     ${received ? `<h2 style="margin-top:.9rem">Received (in ~/Downloads/Myco)</h2>${received}` : ""}
+    <div class="sub" style="margin-top:.6rem">To send straight to a paired phone's Myco app, use "Send file…" on its row above.</div>
     <div class="row" style="margin-top:.7rem">
-      <button data-act="ls-send">Send files</button>
+      <button data-act="ls-send">Offer files on the page</button>
       <button data-act="ls-stop" class="ghost danger">Stop</button>
     </div>
   </div>`;
@@ -636,6 +709,20 @@ document.getElementById("screen").addEventListener("click", (e) => {
       });
     }
     if (kind === "speedtest") dispatch({ type: "speedtest_peer", npub });
+    if (kind === "send-file") {
+      invoke("share_file_with_peer", { npub })
+        .then((json) => {
+          if (!json) return;
+          state = JSON.parse(json);
+          render(true);
+        })
+        .catch((err) => askInfo("Could not send: " + err));
+    }
+    const { id } = act.dataset;
+    if (kind === "ft-accept") dispatch({ type: "accept_file_transfer", transferId: id });
+    if (kind === "ft-decline") dispatch({ type: "decline_file_transfer", transferId: id });
+    if (kind === "ft-cancel") dispatch({ type: "cancel_file_transfer", transferId: id });
+    if (kind === "ft-forget") dispatch({ type: "forget_file_transfer", transferId: id });
     if (kind === "ls-start") {
       invoke("lanshare_start", { mode: lanshareMode })
         .then(refreshLanshare)
@@ -724,7 +811,18 @@ listen("state", (event) => {
     uiLog("first state event received — event delivery works");
   }
   state = JSON.parse(event.payload);
+  promptIncomingOffers();
   render();
+});
+
+// A finished receive, already moved to ~/Downloads/Myco by the backend.
+listen("file-received", (event) => {
+  const f = event.payload;
+  if (f.error) {
+    askInfo(`Received "${f.name}" but could not move it to Downloads (${f.error}). It is at ${f.path}.`);
+  } else {
+    askInfo(`${f.from || "A paired device"} sent you "${f.name}" — saved to ${f.path}.`);
+  }
 });
 
 listen("pair-rotated", () => refreshPairing());

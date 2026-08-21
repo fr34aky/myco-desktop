@@ -159,12 +159,36 @@ function settle(accepted) {{
   if (!current) return;
   handled.add(current.id);
   if (accepted) {{
-    window.location.href = '/offer/' + current.id;
+    // Fetched in-page and saved through a blob link rather than navigating:
+    // a navigation hands the download to Android's DownloadManager, which
+    // refuses to start without an "internet" network — a VPN-only mesh with
+    // Wi-Fi off is exactly that ("check your internet connection").
+    const id = current.id, name = current.name;
+    document.getElementById('offerAccept').disabled = true;
+    saveOffer(id, name).finally(() => {{
+      document.getElementById('offerAccept').disabled = false;
+      overlay.classList.remove('show');
+      current = null;
+    }});
+    return;
   }} else {{
     fetch('/offer/' + current.id + '/decline', {{method: 'POST'}});
   }}
   overlay.classList.remove('show');
   current = null;
+}}
+async function saveOffer(id, name) {{
+  offerText.textContent = 'Receiving "' + name + '"…';
+  try {{
+    const r = await fetch('/offer/' + id);
+    if (!r.ok) throw new Error(r.status);
+    const url = URL.createObjectURL(await r.blob());
+    const a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }} catch (e) {{
+    alert('Could not receive "' + name + '": ' + e);
+  }}
 }}
 document.getElementById('offerAccept').addEventListener('click', () => settle(true));
 document.getElementById('offerDecline').addEventListener('click', () => settle(false));

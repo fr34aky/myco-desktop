@@ -11,6 +11,7 @@
 mod backend;
 mod commands;
 mod deeplinks;
+mod filetransfer;
 mod gateway_http;
 mod lanshare;
 mod nsite_windows;
@@ -68,7 +69,8 @@ fn main() {
             commands::ui_log,
             commands::backend_info,
             commands::share_payload,
-            commands::add_launcher_shortcut
+            commands::add_launcher_shortcut,
+            commands::share_file_with_peer
         ])
         .setup(|app| {
             let choice = match backend::detect() {
@@ -134,6 +136,7 @@ fn main() {
             app.manage(Core(Mutex::new(runtime)));
             app.manage(pairing);
             app.manage(choice);
+            app.manage(filetransfer::Published::default());
             poll::spawn(tauri::AppHandle::clone(app.handle()));
 
             // A cold start via `xdg-open myco://…` carries the link in argv.

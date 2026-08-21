@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Desktop: paired file transfer. A paired phone can send a file straight to
+  the desktop over the mesh — an Accept/Decline prompt appears, and the file
+  lands in `~/Downloads/Myco`. "Send file…" on a Circle contact sends the
+  other way. Live and failed transfers show on the Circle tab with
+  Cancel/Dismiss, as on the phone.
+- Desktop: the LAN share page saves an accepted file in-page instead of
+  handing it to Android's download manager, which refuses a mesh-only (VPN,
+  no internet) network with "check your internet connection".
 - Send a file straight to a paired phone. Share anything from another app, pick
   one of your paired phones, and it arrives encrypted over the mesh — no
   hotspot, no internet. The receiving phone is asked first and can say no, and

@@ -151,6 +151,17 @@ pub async fn lanshare_send_files(
     Ok(())
 }
 
+/// "Send a file" on a Circle contact: native picker, then an encrypted offer
+/// per file to that peer over the mesh. Async so the blocking dialog rides a
+/// worker. Returns the post-dispatch state, or `None` on cancel.
+#[tauri::command]
+pub async fn share_file_with_peer(
+    app: tauri::AppHandle,
+    npub: String,
+) -> Result<Option<String>, String> {
+    Ok(crate::filetransfer::pick_and_share(&app, &npub))
+}
+
 /// Which mesh backend this instance runs on, and whether the embedded node
 /// is degraded to TUN-less — what the Settings screen explains.
 #[tauri::command]

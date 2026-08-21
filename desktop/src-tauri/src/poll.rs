@@ -22,6 +22,7 @@ pub fn spawn(app: AppHandle) {
             runtime.state_json()
         };
         auto_accept(&app, &snapshot);
+        crate::filetransfer::publish_received(&app, &snapshot);
         if app.emit("state", &snapshot).is_err() {
             // The event loop is gone; so is any reason to keep polling.
             return;

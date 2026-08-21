@@ -183,6 +183,7 @@ h1 {
 
 .mono { font-family: ui-monospace, monospace; font-size: 0.75rem; }
 .sub { color: var(--dim); font-size: 0.78rem; }
+.sub.danger { color: var(--danger); }
 .center { text-align: center; margin-top: 0.4rem; }
 .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 

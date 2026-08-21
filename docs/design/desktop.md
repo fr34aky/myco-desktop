@@ -109,6 +109,13 @@ verifies `probe.localhost` resolves to loopback and errors clearly if not.
   advertised as the `.fips` name, Myco devices only; needs the share ports
   in the fips firewall drop-in) or **this network** (LAN bind, any browser
   on the Wi-Fi — the phone-hotspot audience). No AP either way.
+- Paired file transfer (the core's encrypted mesh transfer, upstream #34):
+  the shell only picks files (`share_file_with_peer`, "Send file…" on a
+  Circle row) and publishes a finished receive — the poll loop moves every
+  `completed` + `publishPending` row from the core's private `received/`
+  staging dir to `~/Downloads/Myco` and forgets it, the MediaStore step on
+  the phone. Incoming offers prompt through the in-shell modal queue; live
+  and failed rows sit in a "File transfers" card on Circle.
 - `myco://` deep links via the desktop-file scheme handler +
   single-instance plugin.
 
