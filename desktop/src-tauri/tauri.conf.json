@@ -1,28 +1,52 @@
 {
-  "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Myco",
-  "version": "0.0.1",
-  "identifier": "app.myco.desktop",
-  "build": {
-    "frontendDist": "../ui"
-  },
-  "app": {
-    "withGlobalTauri": true,
-    "windows": [
-      {
-        "label": "main",
-        "title": "Myco",
-        "width": 1100,
-        "height": 720,
-        "minWidth": 480,
-        "minHeight": 480
-      }
-    ],
-    "security": {
-      "csp": null
-    }
-  },
-  "bundle": {
-    "active": false
+ "$schema": "https://schema.tauri.app/config/2",
+ "productName": "Myco",
+ "version": "0.0.1",
+ "identifier": "app.myco.desktop",
+ "build": {
+  "frontendDist": "../ui"
+ },
+ "app": {
+  "withGlobalTauri": true,
+  "windows": [
+   {
+    "label": "main",
+    "title": "Myco",
+    "width": 1100,
+    "height": 720,
+    "minWidth": 480,
+    "minHeight": 480
+   }
+  ],
+  "security": {
+   "csp": null
   }
+ },
+ "bundle": {
+  "active": true,
+  "targets": [
+   "deb",
+   "appimage"
+  ],
+  "icon": [
+   "icons/32x32.png",
+   "icons/128x128.png",
+   "icons/128x128@2x.png",
+   "icons/icon.icns",
+   "icons/icon.ico"
+  ],
+  "category": "Utility",
+  "shortDescription": "Offline-first peer-to-peer nsite browser over the FIPS mesh",
+  "longDescription": "Myco Desktop browses and shares nsites over a local FIPS mesh \u2014 no internet, no app store.",
+  "linux": {
+   "deb": {
+    "depends": [
+     "libwebkit2gtk-4.1-0",
+     "libgtk-3-0",
+     "librsvg2-2",
+     "libayatana-appindicator3-1"
+    ]
+   }
+  }
+ }
 }
