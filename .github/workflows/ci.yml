@@ -32,7 +32,14 @@ jobs:
         run: git clone --depth 1 --branch "$FIPS_REF" "$FIPS_REPO" reference/fips
 
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libclang-dev
+        # libclang for bindgen; the rest are the Tauri (wry/webkit2gtk) system
+        # libraries the `myco-desktop` crate links, without which glib-sys and
+        # friends fail their build scripts under a --workspace clippy/test.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libdbus-1-dev libclang-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libsoup-3.0-dev
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -49,6 +56,7 @@ jobs:
       # Non-gating: surfaces clippy findings without failing on the workspace's
       # pre-existing warnings.
       - name: Clippy
+        continue-on-error: true
         run: cargo clippy --workspace --all-targets
 
       - name: Test
