@@ -1,90 +1,107 @@
-
-
 # Myco Desktop
 
-**This repo is [Myco](https://github.com/Origami74/myco) plus its desktop
-app** — a Linux-first Tauri shell in [`desktop/`](desktop/) that mirrors the
-Android feature set: the Apps grid with each nsite in its own chrome-less
-window, Circle + QR pairing, mesh file sharing with consent, Discover,
-Settings, and the Dev diagnostics. It links `myco-core` directly (no FFI) and
-runs against a system fips daemon when one answers, or embeds its own node —
-BLE, LAN UDP, and its own `fips0` TUN — when none does. Design:
-[`docs/design/desktop.md`](docs/design/desktop.md).
+> **Install apps from the people around you** — over a local mesh, with no
+> internet and no app store. On your computer.
 
-Build (Linux, glibc): the workspace needs a local
-[fips](https://github.com/k0sti/fips) checkout at `reference/fips` (a
-gitignored path dependency — see [`docs/how-to/build.md`](docs/how-to/build.md)
-§4) plus the webkit2gtk/gtk3 dev packages, then:
+Myco Desktop is a Linux-first desktop client for **nsites** — self-contained web
+apps published on Nostr and shared peer-to-peer over a [FIPS](https://github.com/k0sti/fips)
+mesh (Bluetooth LE, Wi-Fi/LAN UDP). Pair with someone, and their apps land in
+your grid, each opening full-screen in its own window — online or fully offline.
+
+![The Apps grid](docs/images-desktop/apps.png)
+
+## Where this comes from
+
+**This is the desktop edition of [Myco](https://github.com/Origami74/myco) — the
+offline-first Android app by [@Origami74](https://github.com/Origami74).** The
+Android app is the original and the source of truth for the protocol, the
+concepts, and the content engine; this repository is a Tauri desktop shell built
+around the very same **`myco-core`** Rust crate (linked directly, no FFI), so a
+laptop is a first-class peer on the same mesh as the phones.
+
+- **The app, the mesh, the concepts** → [Origami74/myco](https://github.com/Origami74/myco)
+  (start with its [concepts & glossary](https://github.com/Origami74/myco/blob/main/docs/design/concepts.md))
+- **The mesh transport** → [FIPS](https://github.com/k0sti/fips) (embedded here,
+  or a system daemon)
+- **This desktop shell** → [`desktop/`](desktop/), designed in
+  [`docs/design/desktop.md`](docs/design/desktop.md)
+
+## What it does
+
+The desktop mirrors the Android feature set — the same five surfaces, driven by
+the same core:
+
+| | |
+| :-- | :-- |
+| ![Circle & QR pairing](docs/images-desktop/circle.png) | **Circle** — pair with a phone by showing a QR code (or pasting a `myco://` code), see who's in your circle, and **send files** to any paired peer over the mesh, with consent on the other end. |
+| ![Discover](docs/images-desktop/discover.png) | **Discover** — a suggested set of public nsites, plus whatever the peers in your circle are carrying right now. |
+| ![Settings](docs/images-desktop/settings.png) | **Settings** — which mesh backend is running (system daemon or embedded node), storage usage and wipes, an offline-only switch, and your device identity. |
+
+- **Apps** — every installed nsite as a tile; each opens chrome-less in its own
+  window, served from a loopback gateway exactly as on the phone.
+- **Dev** — peer diagnostics (transports, RTT, lanes) and a speed test.
+
+## Mesh backends
+
+The shell links `myco-core` directly and picks a backend at startup:
+
+- **Daemon mode** (default when a system fips daemon answers) — talk to the
+  running daemon over its control socket; the mesh lifecycle belongs to systemd.
+- **Embedded mode** (fallback) — an in-process fips node like the phone: its own
+  BLE, LAN UDP, and `fips0` TUN. One-time `sudo desktop/packaging/myco-setup`
+  grants the TUN capability and wires `.fips` name resolution.
+
+Details: [`docs/design/desktop.md`](docs/design/desktop.md).
+
+## Download
+
+Grab the latest `.deb` or AppImage from the
+[**Releases**](https://github.com/fr34aky/myco-desktop/releases) page (Linux
+x86-64). macOS and Windows builds are planned.
 
 ```sh
+# Debian/Ubuntu
+sudo apt install ./Myco_*_amd64.deb
+
+# or run the self-contained AppImage
+chmod +x Myco_*_amd64.AppImage && ./Myco_*_amd64.AppImage
+```
+
+## Build from source
+
+The workspace needs a local [fips](https://github.com/k0sti/fips) checkout at
+`reference/fips` (a gitignored path dependency — see
+[`docs/how-to/build.md`](docs/how-to/build.md) §4) plus the webkit2gtk/gtk3 dev
+packages:
+
+```sh
+sudo apt install -y pkg-config libdbus-1-dev libclang-dev \
+  libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+  libayatana-appindicator3-dev libsoup-3.0-dev
+
 cargo build -p myco-desktop
 ./target/debug/myco-desktop
-# embedded mode only, one-time (and after each rebuild):
+
+# bundle a .deb + AppImage:
+cargo tauri build   # from desktop/src-tauri
+```
+
+Embedded mode needs the one-time capability grant (and again after each rebuild,
+since file capabilities die with the inode):
+
+```sh
 sudo desktop/packaging/myco-setup ./target/debug/myco-desktop
 ```
 
-The original Android README follows.
+## Platforms
 
----
+- **Linux (x86-64)** — built today (`.deb` + AppImage).
+- **macOS / Windows** — planned. Tauri produces `.dmg` / `.msi` from the same
+  `cargo tauri build`; the release workflow is already structured for a runner
+  matrix.
 
-# Myco
-![](docs/myco-banner.png)
+## License
 
-> **Install apps from the people around you** — over Bluetooth, with no internet
-> and no app store.
-
-|  |  |  |  |  |
-| :--: | :--: | :--: | :--: | :--: |
-| ![Tap to pair over NFC](docs/images/01-nfc-pairing.png)<br>**Bump phones to pair** | ![Your Circle of paired people](docs/images/02-circle.png)<br>**Your Circle** | ![Share an app with someone](docs/images/03-app-sharing.png)<br>**Share an app** | ![Installed apps on the home screen](docs/images/04-home.png)<br>**Your apps** | ![An installed app running full-screen](docs/images/05-bitchat.png)<br>**Apps run full-screen** |
-
-![Install apps from the people around you](docs/design/diagrams/intro-01-what-it-is.svg)
-
-Myco is a peer-to-peer app-sharing network. Meet someone, **pair** with a quick
-QR scan, and their apps land in your **Library**, ready to use offline. Pairing
-always goes both ways: the code you scan carries a one-time invite, so the moment
-you connect, apps can flow in either direction between you. Anything you install
-you can pass on to the next person — so apps spread from phone to phone, on their
-own, with no servers and no single point that has to stay online.
-
-![Get started in 3 steps](docs/design/diagrams/intro-02-get-started.svg)
-
-![How apps spread](docs/design/diagrams/intro-03-how-it-spreads.svg)
-
-The apps you collect get their own home-screen icons, and each one opens
-full-screen as its own app:
-
-![Apps you install live on your home screen](docs/design/diagrams/intro-04-on-your-homescreen.svg)
-
-![Every app gets its own window](docs/design/diagrams/intro-05-each-its-own-app.svg)
-
-## How it works (for developers)
-
-Under the hood, an "app" is an **nsite** — a static web app published on Nostr.
-**Installing** an app means syncing and caching its author-signed files so it
-runs offline; **passing it on** is your device re-serving those same signed files
-to the next person. Apps travel over a **FIPS** mesh — including fully offline
-over **Bluetooth (L2CAP)** — with an embedded Nostr relay + Blossom server on
-each device. The reusable content layer (relay + Blossom + gateway + sync) lives
-in a standalone `nsite-deck` crate; the Myco app crate `myco-core` wires it to
-FIPS, BLE, and the Android shell.
-
-Full design docs are in **[docs/](docs/README.md)**:
-
-- [Concepts & glossary](docs/design/concepts.md) — start here
-- [Architecture](docs/design/architecture.md)
-- [The nsite layer](docs/design/nsite-layer.md) · [Propagation](docs/design/propagation.md) · [BLE interop](docs/design/ble-interop.md)
-- [Identity & pairing](docs/design/identity-pairing.md) · [Security](docs/design/security.md)
-- [Deep links](docs/design/deep-links.md) — linking to a place inside an app, and what happens when that app isn't installed yet
-- [Roadmap](docs/roadmap.md)
-
-## Status
-
-**Design phase — not yet built.** This repository currently holds the design
-docs and diagrams. The v1 target is a two-device Android demo over Bluetooth,
-fully offline — one phone browses an app installed from the other. See the
-[roadmap](docs/roadmap.md).
-
-> Built on [nostr-vpn](https://github.com/mmalmi/nostr-vpn) (FIPS data plane),
-> reusing the [FIPS](https://github.com/k0sti/fips) mesh, and reimplementing the
-> nsite-deck content layer in Rust.
-
+[MIT](LICENSE). Myco Desktop bundles `myco-core` from
+[Origami74/myco](https://github.com/Origami74/myco) and the
+[FIPS](https://github.com/k0sti/fips) mesh; see those projects for their terms.
