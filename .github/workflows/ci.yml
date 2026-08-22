@@ -16,7 +16,7 @@ env:
   # app-owned TUN/UDP/radio seams. Built on current fips master; each commit is
   # shaped to be cherry-picked upstream on its own.
   FIPS_REPO: https://github.com/jmcorgan/fips.git
-  FIPS_REF: integration/platform
+  FIPS_REF: fix/platform-ble
   NDK_VERSION: 26.1.10909125
   CARGO_TERM_COLOR: always
 
