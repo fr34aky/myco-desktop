@@ -174,3 +174,63 @@ jobs:
       #   run: |
       #     go install github.com/zapstore/zsp@latest
       #     "$(go env GOPATH)/bin/zsp" publish
+
+  desktop:
+    name: Desktop bundles (.deb + AppImage)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # attach artifacts to the GitHub Release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch fips core
+        run: git clone --depth 1 --branch "$FIPS_REF" "$FIPS_REPO" reference/fips
+
+      - name: Install build deps
+        # bindgen (libclang) + the Tauri (wry/webkit2gtk) system libraries the
+        # bundle links and the AppImage packages.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libdbus-1-dev libclang-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libsoup-3.0-dev
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2.0" --locked
+
+      - name: Build bundles
+        working-directory: desktop/src-tauri
+        run: cargo tauri build --bundles deb,appimage
+
+      - name: Collect bundles
+        run: |
+          mkdir -p dist
+          cp target/release/bundle/deb/*.deb dist/
+          cp target/release/bundle/appimage/*.AppImage dist/
+          ls -lh dist/
+
+      - name: Upload bundle artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: myco-desktop-${{ github.ref_name }}
+          path: dist/*
+          if-no-files-found: error
+
+      # Attach the desktop bundles to the same tagged GitHub Release the APK job
+      # creates. action-gh-release is idempotent per tag: files are added to the
+      # existing release, and omitting name/body leaves the APK job's metadata
+      # untouched.
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
