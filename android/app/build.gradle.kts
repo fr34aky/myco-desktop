@@ -42,6 +42,20 @@ fun localFipsCargoConfigArgs(): List<String> {
     return listOf("--config", "patch.crates-io.fips.path=\"${fipsRoot.absolutePath}\"")
 }
 
+/**
+ * Cargo features for `myco-core` that depend on what the local fips checkout
+ * carries. `fips-multipath` (BLE as a backup path) needs the path roles of the
+ * multi-path branch; detected from the checkout rather than asked for, so a
+ * build against fips master — which has no roles — needs nothing set.
+ */
+fun mycoCoreFeatureArgs(): List<String> {
+    val fipsPath = System.getenv("MYCO_FIPS_REPO_PATH")?.takeIf { it.isNotBlank() }
+        ?: return emptyList()
+    val transportConfig = file(fipsPath).resolve("src/config/transport.rs")
+    val multipath = transportConfig.isFile && transportConfig.readText().contains("pub enum TransportRole")
+    return if (multipath) listOf("--features", "fips-multipath") else emptyList()
+}
+
 tasks.register<Exec>("buildRustArm64") {
     workingDir = repoRoot.asFile
     commandLine(
@@ -53,6 +67,7 @@ tasks.register<Exec>("buildRustArm64") {
             "build",
         ) + localFipsCargoConfigArgs()
           + listOf("--package", "myco-core", "--release")
+          + mycoCoreFeatureArgs()
         ).toTypedArray()
     )
 }
@@ -125,6 +140,11 @@ dependencies {
     // System splash (Android 12+ API, backported to minSdk via the library): a
     // black window with the Myco mark while the activity warms up.
     implementation("androidx.core:core-splashscreen:1.0.1")
+    // The origin-scoped WebView message channel the napplet runtime uses.
+    // `addWebMessageListener` injects only into frames matching an explicit
+    // origin rule, unlike `addJavascriptInterface`, whose object lands in
+    // every frame including a sandboxed napplet's.
+    implementation("androidx.webkit:webkit:1.12.1")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation(platform("androidx.compose:compose-bom:2024.10.00"))
     implementation("androidx.compose.ui:ui")

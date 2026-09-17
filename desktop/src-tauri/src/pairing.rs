@@ -22,6 +22,10 @@ use base64::Engine;
 const PAIR_PREFIX: &str = "myco://pair/";
 const SHARE_PREFIX: &str = "myco://share/";
 const APP_PREFIX: &str = "myco://app/";
+/// A launcher link to an installed napplet — the phone's per-napplet task
+/// document URI (`NappletActivity.documentUri`), keyed on the addressable
+/// pointer rather than the napplet's identity, which changes on every build.
+const NAPPLET_PREFIX: &str = "myco://napplet/";
 const TTL_MS: u64 = 30 * 60 * 1000;
 
 /// A decoded `myco://pair` (or the pairing half of a `myco://share`) payload.
@@ -32,15 +36,29 @@ pub struct PairInfo {
     pub secret: String,
 }
 
+/// The app a `myco://share` carries — one of the two, never both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SharedApp {
+    /// An nsite, by its gateway host.
+    Nsite(String),
+    /// A napplet, by the `naddr` it was added under: the pointer carries the
+    /// author's relay hints, which are often the only relays that hold it
+    /// (`NsiteShare.buildNappletShareUri`).
+    Napplet(String),
+}
+
 /// What a scanned/pasted/deep-linked `myco://` URI asks for.
 #[derive(Debug, Clone)]
 pub enum Link {
     /// Pair with this device.
     Pair(PairInfo),
-    /// Open this nsite and pair with its sharer.
-    Share { nsite: String, pair: PairInfo },
+    /// Open (an nsite) or fetch for review (a napplet), and pair with the
+    /// sharer.
+    Share { app: SharedApp, pair: PairInfo },
     /// Open this nsite (public link, no secrets by design).
     App { host: String },
+    /// Open this installed napplet (a launcher shortcut).
+    Napplet { pointer: String },
     /// Anything else: treated as a pasted nsite link, exactly like Android's
     /// `handleScannedText` fallback.
     Raw(String),
@@ -54,8 +72,14 @@ pub fn parse_link(text: &str) -> Link {
         }
     }
     if let Some(b64) = text.strip_prefix(SHARE_PREFIX) {
-        if let Some((nsite, pair)) = decode_share(b64) {
-            return Link::Share { nsite, pair };
+        if let Some((app, pair)) = decode_share(b64) {
+            return Link::Share { app, pair };
+        }
+    }
+    if let Some(rest) = text.strip_prefix(NAPPLET_PREFIX) {
+        let pointer = rest.split(['?', '#']).next().unwrap_or("").to_string();
+        if !pointer.is_empty() {
+            return Link::Napplet { pointer };
         }
     }
     if let Some(rest) = text.strip_prefix(APP_PREFIX) {
@@ -83,11 +107,20 @@ fn decode_pair(b64: &str) -> Option<PairInfo> {
     (!info.npub.is_empty()).then_some(info)
 }
 
-fn decode_share(b64: &str) -> Option<(String, PairInfo)> {
+fn decode_share(b64: &str) -> Option<(SharedApp, PairInfo)> {
     let v = decode_json(b64)?;
-    let nsite = v.get("nsite")?.as_str()?.to_string();
-    let pair = decode_pair(b64)?;
-    (!nsite.is_empty()).then_some((nsite, pair))
+    let field = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let app = match (field("nsite"), field("napplet")) {
+        (Some(host), _) => SharedApp::Nsite(host),
+        (None, Some(pointer)) => SharedApp::Napplet(pointer),
+        (None, None) => return None,
+    };
+    Some((app, decode_pair(b64)?))
 }
 
 /// Mint a pairing secret: 24 random bytes, unpadded URL-safe base64 — the
@@ -156,18 +189,24 @@ impl Pairing {
         format!("{PAIR_PREFIX}{}", URL_SAFE_NO_PAD.encode(json.to_string()))
     }
 
-    /// A share link: the pair payload plus the nsite to open — the scanner
+    /// A share link: the pair payload plus the app to open — the scanner
     /// pairs with this device (same ledgered secret, so the presenter
     /// auto-accepts) and pulls the app from it. Matches Android's
-    /// `NsiteShare` payload byte-for-byte.
-    pub fn share_uri(&self, npub: &str, name: &str, nsite: &str) -> String {
-        let json = serde_json::json!({
+    /// `NsiteShare` payload byte-for-byte: an nsite under `nsite`, a napplet
+    /// under `napplet`, never both.
+    pub fn share_uri(&self, npub: &str, name: &str, app: &SharedApp) -> String {
+        let mut json = serde_json::json!({
             "v": 1,
-            "nsite": nsite,
             "npub": npub,
             "name": name,
             "secret": self.current_secret(),
         });
+        match app {
+            SharedApp::Nsite(host) => json["nsite"] = serde_json::Value::String(host.clone()),
+            SharedApp::Napplet(pointer) => {
+                json["napplet"] = serde_json::Value::String(pointer.clone())
+            }
+        }
         format!("{SHARE_PREFIX}{}", URL_SAFE_NO_PAD.encode(json.to_string()))
     }
 
@@ -286,12 +325,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let pairing = Pairing::new(&dir);
 
-        let uri = pairing.share_uri("npub1abc", "green sammy", "bitchat.example");
+        let uri = pairing.share_uri(
+            "npub1abc",
+            "green sammy",
+            &SharedApp::Nsite("bitchat.example".to_string()),
+        );
         assert!(uri.starts_with(SHARE_PREFIX));
-        let Link::Share { nsite, pair } = parse_link(&uri) else {
+        let Link::Share { app, pair } = parse_link(&uri) else {
             panic!("must parse as a share link: {uri}");
         };
-        assert_eq!(nsite, "bitchat.example");
+        assert_eq!(app, SharedApp::Nsite("bitchat.example".to_string()));
         assert_eq!(pair.npub, "npub1abc");
         // The share carries the same rotating secret the pair QR shows, so a
         // scan pairs with presenter-side auto-accept.
@@ -305,10 +348,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A napplet share rides the same payload under `napplet` instead of
+    /// `nsite` — the phone's `buildNappletShareUri` — and the pointer is the
+    /// naddr, hints and all, so the receiver searches where the author says.
+    #[test]
+    fn napplet_share_uri_round_trips() {
+        let dir = std::env::temp_dir().join(format!("myco-nshare-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pairing = Pairing::new(&dir);
+
+        let uri = pairing.share_uri(
+            "npub1abc",
+            "green sammy",
+            &SharedApp::Napplet("naddr1xyz".to_string()),
+        );
+        let Link::Share { app, pair } = parse_link(&uri) else {
+            panic!("must parse as a share link: {uri}");
+        };
+        assert_eq!(app, SharedApp::Napplet("naddr1xyz".to_string()));
+        assert_eq!(pair.npub, "npub1abc");
+        // Byte-compatible with the phone: the nsite key is absent, not empty.
+        let json = decode_json(uri.strip_prefix(SHARE_PREFIX).unwrap()).unwrap();
+        assert!(json.get("nsite").is_none());
+        assert_eq!(json["napplet"], "naddr1xyz");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn app_and_raw_links_parse() {
         match parse_link("myco://app/somehost/deep/path") {
             Link::App { host } => assert_eq!(host, "somehost"),
+            other => panic!("{other:?}"),
+        }
+        match parse_link("myco://napplet/naddr1abc") {
+            Link::Napplet { pointer } => assert_eq!(pointer, "naddr1abc"),
             other => panic!("{other:?}"),
         }
         match parse_link("  npub1xyz.nsite.lol  ") {

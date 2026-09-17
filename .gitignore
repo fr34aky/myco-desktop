@@ -51,3 +51,6 @@ node_modules/
 # Standalone mesh exit-node daemon (developed in-tree, not shipped)
 /fips-exitnode/
 /desktop/src-tauri/gen/
+
+# GSD planning artifacts stay local
+.planning/

@@ -34,6 +34,13 @@ mod ip_source;
 // lib build. See `reference/thinning-custom-relay.md`.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod mesh_relay;
+// Wires `myco-napplet-runtime` to this device's relay and Blossom store, and
+// holds one session per open napplet window. See
+// `docs/design/napplet/napplet-runtime.md`.
+mod napplet;
+mod outbox;
+// The user key a napplet publishes as — separate from the mesh device key (D3).
+mod user_key;
 // The `MESH` envelope that carries mesh state alongside — never inside — a
 // NIP-01 message on the peer link. See `reference/thinning-custom-relay.md`.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -55,6 +62,7 @@ mod settings_store;
 // host; the Android JNI bridge is its only real caller.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod advert_names;
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod lane_observation;
 mod peer_diagnostics;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -95,6 +103,10 @@ mod tun_bridge_jni;
 pub use action::NativeAppAction;
 pub use content::Content;
 pub use control_client::SYSTEM_SOCKET_PATH;
+// The desktop shell hosts napplets the way `jni_abi` does — it holds the host
+// and opens sessions with the runtime lock released — so the two types it
+// names are exported beside the runtime itself.
+pub use napplet::{NappletHost, OpenedNapplet};
 pub use nsite_deck::GatewayResponse;
 pub use runtime::{AppRuntime, MeshBackend, RuntimeConfig, TunPolicy};
 pub use state::{AppState, IdentityView, NodeStatus};

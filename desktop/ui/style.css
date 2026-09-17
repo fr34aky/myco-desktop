@@ -144,6 +144,40 @@ h1 {
 #menu button.danger { color: var(--danger); }
 
 .tile.syncing .glyph { opacity: 0.45; }
+/* An installed napplet whose bytes are not on this device (after "Delete
+   cache", say): dimmed like an nsite that is not downloaded. */
+.tile.dim .glyph { opacity: 0.45; }
+
+/* The duck marks a napplet — a program Myco hosts, as against a site it
+   serves — on a small light chip with a dark rim, legible on every tile. */
+.tile .glyph .badge {
+  position: absolute;
+  right: 2px;
+  top: 2px;
+  z-index: 2;
+  font-size: 0.7rem;
+  line-height: 1;
+  padding: 2px 3px;
+  border-radius: 6px;
+  background: #f5f5f5;
+  border: 1px solid #111;
+}
+
+/* A capability, as a person reads it: a name and what allowing it means. */
+.cap { display: flex; align-items: flex-start; gap: 0.7rem; padding: 0.45rem 0; }
+.cap input { margin-top: 0.25rem; accent-color: var(--accent); }
+.cap .cap-title { font-size: 0.9rem; font-weight: 600; }
+.cap .cap-detail { font-size: 0.78rem; color: var(--muted); }
+.cap.off .cap-title { color: var(--muted); }
+
+/* The hop-count stepper on Settings › App reach. */
+.stepper { display: flex; align-items: center; gap: 0.5rem; }
+.stepper button { min-width: 2rem; }
+.stepper .n { min-width: 1.5rem; text-align: center; font-weight: 700; }
+
+/* Every path fips holds to a peer, fixed-width like the phone's Dev tab. */
+.paths { margin-top: 0.4rem; white-space: pre; }
+.paths .active { color: var(--fg); }
 
 .tile .title {
   font-size: 0.85rem;
@@ -309,6 +343,32 @@ details .forensics {
 }
 
 #modal p { font-size: 0.95rem; line-height: 1.45; }
+
+#review-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 19;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#review {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 1.2rem;
+  width: 26rem;
+  max-width: calc(100vw - 2rem);
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.7);
+}
+
+#review h3 { font-size: 1.05rem; margin-bottom: 0.2rem; }
+#review .desc { font-size: 0.85rem; color: var(--muted); margin: 0.4rem 0 0.8rem; }
+#review .modal-actions button { font-weight: 700; }
 
 #modal input {
   width: 100%;

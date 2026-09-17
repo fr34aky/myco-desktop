@@ -14,6 +14,7 @@ mod deeplinks;
 mod filetransfer;
 mod gateway_http;
 mod lanshare;
+mod napplets;
 mod nsite_windows;
 mod pairing;
 mod poll;
@@ -56,6 +57,7 @@ fn main() {
             commands::dispatch,
             commands::get_state,
             commands::open_nsite_window,
+            commands::open_napplet_window,
             commands::pair_payload,
             commands::handle_link,
             commands::invite_peer,
@@ -97,8 +99,17 @@ fn main() {
             // runtime; without a content layer (startup error) neither runs.
             let share = std::sync::Arc::new(lanshare::LanShare::default());
             if let Some((content, handle)) = runtime.gateway_context() {
-                gateway_http::spawn(content, handle.clone());
+                gateway_http::spawn(
+                    tauri::AppHandle::clone(app.handle()),
+                    content,
+                    handle.clone(),
+                );
                 share.attach(tauri::AppHandle::clone(app.handle()), handle);
+            }
+            // The napplet host rides the same content layer: the gateway
+            // serves its shell pages and carries its capability channel.
+            if let Some((host, _)) = runtime.napplet_context() {
+                app.manage(std::sync::Arc::new(napplets::Napplets::new(host)));
             }
             app.manage(std::sync::Arc::clone(&share));
 

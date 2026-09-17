@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -26,6 +27,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
@@ -48,6 +50,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -111,13 +115,28 @@ private val TABS = listOf(
     Tab("dev", "Dev", Icons.Filled.Terminal),
 )
 
+/**
+ * Picked share URIs across a configuration change. A `Uri` is Parcelable, but the
+ * list handed back by the picker is not guaranteed to be a shape the default saver
+ * can store, so save the strings and parse them back.
+ */
+private val UriListSaver = listSaver<List<Uri>, String>(
+    save = { it.map(Uri::toString) },
+    restore = { it.map(Uri::parse) },
+)
+
 @Composable
 fun MycoApp(
     client: AppCoreClient,
     onBleToggle: (Boolean) -> Unit,
     wifiAwareSupported: Boolean,
     onWifiAwareToggle: (Boolean) -> Unit,
+    /** The LAN lane's mDNS discovery switch, as last persisted. */
+    initialLanEnabled: Boolean = true,
+    onLanToggle: (Boolean) -> Unit = {},
     onLaunchNsite: (host: String, title: String) -> Unit,
+    onLaunchNapplet: (pointer: String, title: String) -> Unit,
+    onPinNappletToHome: (pointer: String, title: String) -> Unit,
     onPinToHome: (host: String, title: String) -> Unit,
     onScanned: (String) -> Unit,
     initialMeshEnabled: Boolean,
@@ -147,6 +166,9 @@ fun MycoApp(
     var meshEnabled by remember { mutableStateOf(initialMeshEnabled) }
     // Developer mode gates the Dev tab; hoisted so toggling it rebuilds the nav bar.
     var developerMode by remember { mutableStateOf(initialDeveloperMode) }
+    // Kotlin-owned like developerMode: the LAN browse is an Android NsdManager
+    // affair the core never sees, so there is no core state to read it from.
+    var lanEnabled by remember { mutableStateOf(initialLanEnabled) }
     // BLE advertiser exhaustion (set by the radio, read here for the Settings badge).
     var bleExhausted by remember { mutableStateOf(BleHealth.advertiserExhausted) }
     // Name of a peer we just connected to (drives the "connected" celebration).
@@ -217,7 +239,10 @@ fun MycoApp(
         val added = current - knownInvites.value
         if (added.isNotEmpty()) {
             state.outboundPairs.firstOrNull { it.npub in added }?.let {
-                justInvited = it.name.ifEmpty { "them" }
+                // Resolve the name the same way every other surface does, so an
+                // invite recorded without one says the peer's npub-derived name
+                // rather than borrowing whatever string happened to be stored.
+                justInvited = peerLabel(state, it.npub)
             }
         }
         knownInvites.value = current
@@ -237,6 +262,20 @@ fun MycoApp(
     }
 
     val nav = rememberNavController()
+    // "Send a file" from a Circle contact: remember who, then let the user pick what.
+    // Saveable, not merely remembered: the document picker is another activity, and
+    // a rotation behind it — or the sheet rotating afterwards — would otherwise drop
+    // the contact and the picks on the floor, leaving the user to start over with no
+    // sign of why.
+    var sendFileNpub by rememberSaveable { mutableStateOf<String?>(null) }
+    var pickedShareUris by rememberSaveable(stateSaver = UriListSaver) {
+        mutableStateOf<List<Uri>>(emptyList())
+    }
+    val pickFilesForPeer = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) pickedShareUris = uris else sendFileNpub = null
+    }
     // Keep the navigation host and all transient surfaces in one app-root layer.
     // File offers must not be owned by Circle or any other selected destination.
     Box(Modifier.fillMaxSize()) {
@@ -296,12 +335,43 @@ fun MycoApp(
         Surface(modifier = Modifier.padding(padding), color = MaterialTheme.colorScheme.background) {
             NavHost(navController = nav, startDestination = "apps") {
                 composable("apps") {
-                    AppsScreen(state, client, onLaunchNsite = onLaunchNsite, onPinToHome = onPinToHome, onScanned = onScanned)
+                    AppsScreen(
+                        state,
+                        client,
+                        onLaunchNsite = onLaunchNsite,
+                        onLaunchNapplet = onLaunchNapplet,
+                        onPinNappletToHome = onPinNappletToHome,
+                        onPinToHome = onPinToHome,
+                        onScanned = onScanned,
+                    )
                 }
                 composable("circle") {
-                    CircleScreen(state, client, onOpenQr = { nav.navigate("qr") })
+                    CircleScreen(
+                        state,
+                        client,
+                        onOpenQr = { nav.navigate("qr") },
+                        onSendFile = { peer ->
+                            sendFileNpub = peer.npub
+                            pickFilesForPeer.launch(arrayOf("*/*"))
+                        },
+                    )
                 }
-                composable("discover") { DiscoverScreen(state, client, onLaunchNsite = onLaunchNsite) }
+                composable("discover") {
+                    DiscoverScreen(
+                        state,
+                        client,
+                        onLaunchNsite = onLaunchNsite,
+                        // The review sheet lives on the Apps tab and is driven by
+                        // state.nappletReview, which the fetch has already set.
+                        onShowNappletReview = {
+                            nav.navigate("apps") {
+                                popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        },
+                    )
+                }
                 composable("settings") {
                     SettingsScreen(
                         state = state,
@@ -309,6 +379,8 @@ fun MycoApp(
                         onBleToggle = onBleToggle,
                         wifiAwareSupported = wifiAwareSupported,
                         onWifiAwareToggle = onWifiAwareToggle,
+                        lanEnabled = lanEnabled,
+                        onLanToggle = { on -> lanEnabled = on; onLanToggle(on) },
                         meshEnabled = meshEnabled,
                         onMeshToggle = { on -> meshEnabled = on; onMeshToggle(on) },
                         onOfflineOnlyToggle = onOfflineOnlyToggle,
@@ -430,14 +502,25 @@ fun MycoApp(
         )
     }
 
+    // Files come either from Android's Sharesheet (peer chosen afterwards) or from
+    // a contact's sheet on the Circle tab (peer chosen first, files picked here).
+    // Both end in the same sheet; the Circle path just arrives with a preselection.
+    val shareUris = externalShareUris.ifEmpty { pickedShareUris }
     var peerShareVisible by remember { mutableStateOf(false) }
-    androidx.compose.runtime.LaunchedEffect(externalShareUris) {
-        if (externalShareUris.isNotEmpty()) peerShareVisible = true
+    androidx.compose.runtime.LaunchedEffect(shareUris) {
+        if (shareUris.isNotEmpty()) peerShareVisible = true
     }
-    if (peerShareVisible && externalShareUris.isNotEmpty()) {
+    if (peerShareVisible && shareUris.isNotEmpty()) {
         PeerShareSheet(
             state = state,
-            uris = externalShareUris,
+            uris = shareUris,
+            // Only if they are still there: a contact can drop off the mesh between
+            // the tap and the picker closing, and a preselection the picker then
+            // hides under "offline" is a selection the user cannot see.
+            preselectedNpub = sendFileNpub?.takeIf {
+                externalShareUris.isEmpty() &&
+                    (it in state.reachableNpubs || state.blePeers.any { p -> p.npub == it && p.connected })
+            },
             onDismiss = {
                 peerShareVisible = false
                 // Closing the sheet acknowledges the outcomes it was showing.
@@ -449,9 +532,11 @@ fun MycoApp(
                     .filter { it.status == "cancelled" || it.status == "denied" }
                     .forEach { client.dispatch(NativeActions.forgetFileTransfer(it.id)) }
                 state = client.state()
+                pickedShareUris = emptyList()
+                sendFileNpub = null
                 onExternalShareDismissed()
             },
-            onShare = { peer -> onShareToPeer(externalShareUris, peer) },
+            onShare = { peer -> onShareToPeer(shareUris, peer) },
             onCancelTransfer = {
                 state = client.dispatch(NativeActions.cancelFileTransfer(it.id))
             },
@@ -553,8 +638,8 @@ fun PeersPill(state: AppState) {
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.padding(start = 6.dp, end = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.padding(start = 4.dp, end = 4.dp),
         ) {
             // 1 — mesh master switch: the same slider as the Settings rows,
             // scaled down to pill height.
@@ -567,9 +652,10 @@ fun PeersPill(state: AppState) {
             // onCheckedChange makes the slider a pure indicator and the entire
             // 72×48 block the target. `scale` is a draw transform only, so the
             // slider stays small while the target does not.
-            Box(
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
-                    .size(width = 72.dp, height = 48.dp)
+                    .height(40.dp)
                     .toggleable(
                         value = mesh.enabled,
                         onValueChange = { mesh.toggle(it) },
@@ -578,20 +664,31 @@ fun PeersPill(state: AppState) {
                         // the thing it draws reads as a misaligned button.
                         indication = null,
                         interactionSource = remember { MutableInteractionSource() },
-                    ),
-                contentAlignment = Alignment.Center,
+                    )
+                    .padding(start = 6.dp),
             ) {
-                androidx.compose.material3.Switch(
-                    checked = mesh.enabled,
-                    onCheckedChange = null,
-                    modifier = Modifier.scale(0.75f),
-                    colors = androidx.compose.material3.SwitchDefaults.colors(
-                        // Off is a fault state here, not a neutral one.
-                        uncheckedTrackColor = MaterialTheme.colorScheme.error,
-                        uncheckedBorderColor = MaterialTheme.colorScheme.error,
-                        uncheckedThumbColor = MaterialTheme.colorScheme.onError,
-                    ),
+                // Named, so the slider is not a mystery switch on every screen.
+                Text(
+                    "mesh",
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.labelMedium,
                 )
+                Box(
+                    modifier = Modifier.size(width = 52.dp, height = 40.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    androidx.compose.material3.Switch(
+                        checked = mesh.enabled,
+                        onCheckedChange = null,
+                        modifier = Modifier.scale(0.7f),
+                        colors = androidx.compose.material3.SwitchDefaults.colors(
+                            // Off is a fault state here, not a neutral one.
+                            uncheckedTrackColor = MaterialTheme.colorScheme.error,
+                            uncheckedBorderColor = MaterialTheme.colorScheme.error,
+                            uncheckedThumbColor = MaterialTheme.colorScheme.onError,
+                        ),
+                    )
+                }
             }
             // 2/3 — the counts, and the whole of them is the panel affordance.
             Row(
@@ -602,7 +699,7 @@ fun PeersPill(state: AppState) {
                         onClick = { sheetOpen = true },
                         onClickLabel = "Show mesh and circle status",
                     )
-                    .padding(start = 2.dp, end = 10.dp, top = 10.dp, bottom = 10.dp),
+                    .padding(start = 2.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
             ) {
                 PillDivider()
                 // Circle: reachable now / total paired.
@@ -626,6 +723,14 @@ fun PeersPill(state: AppState) {
                     "$connected",
                     fontWeight = FontWeight.SemiBold,
                     style = MaterialTheme.typography.titleSmall,
+                )
+                // The invitation: the counts are a summary, and this says
+                // there is more behind them.
+                Icon(
+                    Icons.Outlined.Info,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp).padding(start = 1.dp),
+                    tint = LocalContentColor.current.copy(alpha = 0.7f),
                 )
             }
         }

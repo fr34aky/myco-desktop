@@ -12,7 +12,13 @@ description = "Myco desktop shell (Tauri): the Android app's feature set on Linu
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-myco-core = { path = "../../myco-core" }
+# `fips-multipath`: the desktop builds against the same fips branch upstream
+# pins (`feat/multi-path-switchover`, see .github/workflows), so the BLE
+# transport is a `backup` path here as on the phone and `multipath_core`
+# reports true. Drop the feature to build against fips master.
+myco-core = { path = "../../myco-core", features = ["fips-multipath"] }
+# The napplet shell page and the shell-host helpers, shared with the core.
+myco-napplet-runtime = { path = "../../myco-napplet-runtime" }
 tauri = { version = "2", features = [] }
 serde = { workspace = true }
 serde_json = { workspace = true }

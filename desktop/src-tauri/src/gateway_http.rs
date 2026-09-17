@@ -10,6 +10,12 @@
 //!
 //! The port is fixed: the origin is the nsites' `localStorage` identity, so it
 //! must be stable across restarts.
+//!
+//! Napplet shell hosts (`<label>.napplet.localhost`) are answered by
+//! `napplets` instead — the shell page and its capability channel — and never
+//! by the nsite gateway: an nsite must not be reachable at a shell origin,
+//! nor a shell at an nsite one (`NappletWebViewClient` on the phone draws the
+//! same line).
 
 use std::sync::Arc;
 
@@ -18,6 +24,17 @@ use axum::extract::{Request, State};
 use axum::http::header::{HeaderName, HeaderValue, CONTENT_TYPE, HOST};
 use axum::response::Response;
 use myco_core::Content;
+use tauri::AppHandle;
+
+use crate::napplets::Napplets;
+
+/// What every request is answered from: the content layer for nsites, the
+/// app handle for napplet windows and their sessions.
+#[derive(Clone)]
+struct Gateway {
+    content: Arc<Content>,
+    app: AppHandle,
+}
 
 /// The gateway's loopback port. Desktop-new; see the ports section of the
 /// design page.
@@ -26,7 +43,7 @@ pub const GATEWAY_PORT: u16 = 4880;
 /// Bind and serve on the core's own tokio runtime. A bind failure is loud but
 /// not fatal — the shell still runs; nsite windows would show connection
 /// errors, and the port squatter is named in the log.
-pub fn spawn(content: Arc<Content>, handle: tokio::runtime::Handle) {
+pub fn spawn(app: AppHandle, content: Arc<Content>, handle: tokio::runtime::Handle) {
     handle.spawn(async move {
         let addr = format!("127.0.0.1:{GATEWAY_PORT}");
         let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -36,17 +53,33 @@ pub fn spawn(content: Arc<Content>, handle: tokio::runtime::Handle) {
                 return;
             }
         };
-        let app = axum::Router::new()
-            .fallback(serve_nsite)
-            .with_state(content);
-        if let Err(e) = axum::serve(listener, app).await {
+        let router = axum::Router::new()
+            .fallback(serve)
+            .with_state(Gateway { content, app });
+        if let Err(e) = axum::serve(listener, router).await {
             eprintln!("myco-desktop: gateway server exited: {e}");
         }
     });
 }
 
 /// Every request, any path: route on the `Host` header.
-async fn serve_nsite(State(content): State<Arc<Content>>, req: Request) -> Response {
+async fn serve(State(gateway): State<Gateway>, req: Request) -> Response {
+    if let Some(shell) = shell_host(&req) {
+        return Napplets::serve(gateway.app, shell, req).await;
+    }
+    serve_nsite(gateway.content, req).await
+}
+
+/// The napplet shell origin a request is for, lower-cased, if it is one.
+/// Checked before the nsite suffix: `x.napplet.localhost` also ends in
+/// `.localhost`.
+fn shell_host(req: &Request) -> Option<String> {
+    let host = req.headers().get(HOST)?.to_str().ok()?;
+    let name = host.split(':').next()?;
+    Napplets::is_shell_host(name).then(|| name.to_ascii_lowercase())
+}
+
+async fn serve_nsite(content: Arc<Content>, req: Request) -> Response {
     let Some(host) = nsite_host(&req) else {
         return plain(400, "expected Host: <site>.localhost");
     };

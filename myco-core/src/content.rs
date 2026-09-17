@@ -8,9 +8,9 @@
 //!
 //! Sync is **spawn-not-block**: `open_site` runs on the Tokio runtime and writes
 //! status into `sites`; the reducer never blocks on it (Kotlin polls `siteStatus`
-//! via `Tick`). See `docs/design/nsite-layer.md` and the FFI contract.
+//! via `Tick`). See `docs/design/nsite/nsite-layer.md` and the FFI contract.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -51,20 +51,52 @@ pub struct SiteStatusView {
     /// update auto-applies, so this is only briefly true.
     pub update_available: bool,
     /// Download progress of a staging update (0/0 when none). See
-    /// `docs/design/nsite-updates.md` §3.3.
+    /// `docs/design/nsite/nsite-updates.md` §3.3.
     pub update_pulled: u64,
     pub update_total: u64,
 }
 
 /// Status of the most recent "check for updates" run, so the UI can give the user
 /// feedback (checking → result). `generation` bumps each time a check **finishes**,
-/// letting the UI fire a one-shot toast. See `docs/design/nsite-updates.md` §3.3.
+/// letting the UI fire a one-shot toast. See `docs/design/nsite/nsite-updates.md` §3.3.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateCheckView {
     pub checking: bool,
     pub message: String,
     pub generation: u64,
+}
+
+/// How the nsite half of an update check ended.
+enum NsiteCheck {
+    /// No nsites installed; nothing was asked.
+    Nothing,
+    /// Checked, with the message to show.
+    Done(String),
+}
+
+/// The napplet half of an update-check toast.
+fn napplet_update_message(updated: usize, checked: usize) -> String {
+    match (updated, checked) {
+        (_, 0) => "no napplets to check".to_string(),
+        (0, _) => "napplets are up to date".to_string(),
+        (n, _) => format!("{n} napplet(s) updated"),
+    }
+}
+
+/// What kind of app a Library entry is.
+///
+/// Defaults to [`LibraryKind::Nsite`] so every entry written before napplets
+/// existed reads back as what it is, with no migration pass over
+/// `library.json`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LibraryKind {
+    /// A static site Myco serves through the gateway (NIP-5A, 15128/35128).
+    #[default]
+    Nsite,
+    /// A program Myco hosts through the capability seam (NIP-5D, 5129/15129/35129).
+    Napplet,
 }
 
 /// A Library entry (a pinned/opened site). Persisted to `library.json`.
@@ -77,6 +109,80 @@ pub struct LibraryItem {
     pub url_host: String,
     pub pinned: bool,
     pub added_at: u64,
+    #[serde(default)]
+    pub kind: LibraryKind,
+    /// Capability domains the user approved — at install review, or later on
+    /// the app's sheet. Napplets only. An inbound intent cannot add to it.
+    #[serde(default)]
+    pub granted: Vec<String>,
+    /// Capability domains the user switched **off** on the app's sheet.
+    ///
+    /// Kept apart from "not granted" because the two mean different things at
+    /// launch: a declared domain this build newly implements is granted on open
+    /// (what the user agreed to was "what it declares"), but a domain the user
+    /// has said no to must stay off however plainly the napplet declares it.
+    /// Without this set the sheet's switch flipped itself back on at the next
+    /// launch.
+    #[serde(default)]
+    pub denied: Vec<String>,
+    /// The pointer this was added by — the `naddr` when there was one.
+    ///
+    /// Kept because an `naddr` carries the author's own relay hints, and those
+    /// are frequently the only relays that hold the napplet: of Myco's default
+    /// relays exactly one carried the napplet this was first tested against.
+    /// Reloading from a reconstructed `<npub>:<dtag>` would throw the hints
+    /// away and search blind.
+    #[serde(default)]
+    pub pointer: String,
+    /// The `requires` list the review sheet showed when this napplet was
+    /// installed — what the user actually saw and agreed to. Napplets only.
+    ///
+    /// Bounds what a launch may widen `granted` to: a domain this build newly
+    /// implements is granted at open only if it was on this list. A later
+    /// manifest declaring more than was reviewed goes back through the review
+    /// sheet rather than being granted on the strength of an update check the
+    /// user never saw. Kotlin ignores the key.
+    #[serde(default)]
+    pub reviewed: Vec<String>,
+}
+
+/// A napplet's grants as the Library records them: what the user allowed, what
+/// the user switched off, and what the review sheet showed them. A domain in
+/// neither `granted` nor `denied` was never decided — which is what lets a
+/// launch grant a declared domain this build newly implements, provided it was
+/// on the `reviewed` list, without overriding a decision the user did make.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NappletGrants {
+    pub granted: Vec<String>,
+    pub denied: Vec<String>,
+    /// The declared `requires` the user reviewed at install. See
+    /// [`LibraryItem::reviewed`].
+    pub reviewed: Vec<String>,
+}
+
+/// Whether an installed napplet can open, for its tile.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NappletStatusView {
+    /// The shell host the Library entry carries as `url_host`.
+    pub host: String,
+    /// `ready` when the served manifest and its index blob are both here,
+    /// `missing` when either is not.
+    pub state: String,
+    pub message: String,
+}
+
+impl NappletGrants {
+    /// Allow or withdraw one domain, keeping the two sets disjoint.
+    pub fn set(&mut self, domain: &str, allowed: bool) {
+        self.granted.retain(|d| d != domain);
+        self.denied.retain(|d| d != domain);
+        if allowed {
+            self.granted.push(domain.to_string());
+        } else {
+            self.denied.push(domain.to_string());
+        }
+    }
 }
 
 /// A **Circle** contact: a paired peer whose device we can pull nsites from over
@@ -271,7 +377,7 @@ const INVITE_VALID_SECS: u64 = 7 * 24 * 60 * 60;
 /// service** at `:4873` (never gossiped, and never stored — the relay refuses
 /// these kinds from every source). Signed by the **device** key, which is the
 /// pairing identity, and carrying a NIP-40 expiry the auth service checks on
-/// receipt. See `docs/design/identity-pairing.md`.
+/// receipt. See `docs/design/core/identity-pairing.md`.
 pub const KIND_PAIR_REQUEST: u16 = 9101;
 pub const KIND_PAIR_ACCEPT: u16 = 9102;
 /// Sent when a peer forgets you, so both sides drop the pairing symmetrically.
@@ -289,12 +395,17 @@ const PAIR_DIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_sec
 /// how long a node downstream holds query state — late results are not an error,
 /// they simply arrive to whoever is still listening
 /// (`reference/thinning-custom-relay.md`, D8).
-const PULL_BUDGET_MS: u32 = 10_000;
+pub(crate) const PULL_BUDGET_MS: u32 = 10_000;
 
 /// Longest a single forwarded hop will wait on a peer, used when no budget rode
 /// in (an older peer, or a pull that never carried one). A budget that did
 /// arrive only ever shortens this.
 const PULL_HOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// How long napplet-driven internet lanes are skipped after every public relay
+/// failed in one round. Short: a phone walking back into Wi-Fi should not wait
+/// long to notice.
+pub(crate) const INTERNET_DOWN_FOR: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The mesh access gate backing the relay + Blossom servers: content (reads, chat,
 /// manifests, blobs) is restricted to **paired** (Circle) peers, and what a paired
@@ -307,11 +418,15 @@ const PULL_HOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 ///
 /// Holds the [`Content`] so the live Circle is consulted per request: adding a
 /// peer, removing one, or changing a permission takes effect immediately.
+// Constructed by the Android runtime's mesh relay wiring; the host build has
+// no mesh socket to gate.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub struct CircleGate {
     content: Arc<Content>,
 }
 
 impl CircleGate {
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub fn new(content: Arc<Content>) -> Self {
         Self { content }
     }
@@ -379,6 +494,9 @@ pub struct Content {
     /// it pulls only over the mesh (holder + connected Circle peers). Lets you
     /// verify the mesh path even when this device has internet (e.g. a hotspot).
     offline_only: AtomicBool,
+    /// When the internet last looked down from here, as a moment until which
+    /// napplet-driven internet lanes are skipped. See [`Content::internet_looks_down`].
+    internet_down_until: Mutex<Option<std::time::Instant>>,
     library: Mutex<Vec<LibraryItem>>,
     library_path: PathBuf,
     /// The Circle: paired peers we pull from over the mesh. Persisted.
@@ -424,7 +542,7 @@ pub struct Content {
     /// keepwarm tick to spot the absent→present (reappeared) edge.
     prev_pool_connected: Mutex<HashSet<String>>,
     /// host_label -> a newer version being staged (downloaded) before activation.
-    /// See `docs/design/nsite-updates.md` §2. P-U1: staged outside the relay store;
+    /// See `docs/design/nsite/nsite-updates.md` §2. P-U1: staged outside the relay store;
     /// activation stores the manifest (making it the served version).
     pending_updates: Mutex<HashMap<String, PendingUpdate>>,
     /// Status of the latest update check, for UI feedback (checking → result).
@@ -432,6 +550,17 @@ pub struct Content {
     /// Native paired-peer file transfers. Metadata is persisted; file keys and
     /// encrypted outbox paths remain inside the app-private data directory.
     file_transfers: Mutex<Vec<FileTransferRecord>>,
+    /// Incoming transfers this device finished, newest last, as `(id, peer)`.
+    /// The row itself is forgotten as soon as the shell publishes the file, but
+    /// the sender may still be retrying its `ready` if our `complete` was lost —
+    /// this is what lets a late `ready` be answered with a fresh `complete`
+    /// rather than refused as unknown. The peer is kept alongside the id so an
+    /// answer goes only to the peer the transfer was with; every other check on
+    /// that path binds the peer, and this one must too. Persisted, so a restart
+    /// in the window between publishing the file and the sender giving up does
+    /// not cost them the whole offer TTL.
+    completed_incoming: Mutex<VecDeque<(String, String)>>,
+    completed_incoming_path: PathBuf,
     file_transfers_path: PathBuf,
     file_outbox_dir: PathBuf,
     received_dir: PathBuf,
@@ -439,16 +568,20 @@ pub struct Content {
     /// relay's newest, so a newer (received/checked) manifest can sit in the relay
     /// store (NIP-01-faithful, propagated to peers) while we keep serving the fully
     /// downloaded version until its replacement is staged. See
-    /// `docs/design/nsite-updates.md` §1. Persisted to `active.json`.
+    /// `docs/design/nsite/nsite-updates.md` §1. Persisted to `active.json`.
     active_manifests: Mutex<HashMap<String, Event>>,
     active_path: PathBuf,
+    /// Whether each installed napplet can open right now, keyed by shell host.
+    /// Rebuilt at startup, after a cache wipe, and whenever a version is
+    /// pinned — the napplet counterpart of `sites` for nsites.
+    napplet_status: Mutex<HashMap<String, NappletStatusView>>,
 }
 
 /// A [`RelayBackend`] view the **gateway** reads: it returns the core-chosen
 /// **active** manifest for a slot (a version whose blobs are all local), falling
 /// back to the relay's newest when we haven't pinned one. Every other call passes
 /// straight through to the relay. This is what keeps a working app serving while a
-/// newer manifest is still downloading. See `docs/design/nsite-updates.md` §1.
+/// newer manifest is still downloading. See `docs/design/nsite/nsite-updates.md` §1.
 struct ActiveBackend<'a> {
     relay: &'a dyn RelayBackend,
     active: &'a Mutex<HashMap<String, Event>>,
@@ -509,7 +642,7 @@ fn save_active(path: &Path, events: &[Event]) {
 
 /// A newer manifest version being downloaded in the background. Until its blobs
 /// are all local it is **not** stored in the relay, so the gateway keeps serving
-/// the active version (`docs/design/nsite-updates.md` §2/§5).
+/// the active version (`docs/design/nsite/nsite-updates.md` §2/§5).
 struct PendingUpdate {
     manifest: Event,
     total: u32,
@@ -597,6 +730,8 @@ impl Content {
         let active_manifests = load_active(&active_path);
         let file_transfers_path = data_dir.join("file_transfers.json");
         let file_transfers = load_file_transfers(&file_transfers_path);
+        let completed_incoming_path = data_dir.join("completed_transfers.json");
+        let completed_incoming = load_completed_incoming(&completed_incoming_path);
         let file_outbox_dir = data_dir.join("file-outbox");
         let received_dir = data_dir.join("received");
         let _ = std::fs::create_dir_all(&file_outbox_dir);
@@ -610,6 +745,7 @@ impl Content {
             blobs,
             source: Mutex::new(None),
             offline_only: AtomicBool::new(false),
+            internet_down_until: Mutex::new(None),
             library: Mutex::new(library),
             library_path,
             circle: Mutex::new(circle),
@@ -628,11 +764,14 @@ impl Content {
             pending_updates: Mutex::new(HashMap::new()),
             update_check: Mutex::new(UpdateCheckView::default()),
             file_transfers: Mutex::new(file_transfers),
+            completed_incoming: Mutex::new(completed_incoming),
+            completed_incoming_path,
             file_transfers_path,
             file_outbox_dir,
             received_dir,
             active_manifests: Mutex::new(active_manifests),
             active_path,
+            napplet_status: Mutex::new(HashMap::new()),
         })
     }
 
@@ -648,6 +787,44 @@ impl Content {
 
     pub fn is_offline_only(&self) -> bool {
         self.offline_only.load(Ordering::Relaxed)
+    }
+
+    /// Whether a napplet's internet lane should be skipped right now: the
+    /// user said mesh-only, or every public relay timed out a moment ago.
+    ///
+    /// The second is a breaker, not a setting. A phone with no route out
+    /// still has DNS and TCP timeouts to pay, per relay, per call — and a
+    /// napplet that fires several calls pays them several times over while
+    /// its local results wait behind them. One full round of failures buys
+    /// [`INTERNET_DOWN_FOR`] of skipping; the next call after that tries again.
+    pub fn internet_looks_down(&self) -> bool {
+        if self.is_offline_only() {
+            return true;
+        }
+        self.internet_down_until
+            .lock()
+            .unwrap()
+            .is_some_and(|until| std::time::Instant::now() < until)
+    }
+
+    /// Record how a round of internet lanes went. All failed → trip the
+    /// breaker; any succeeded → reset it.
+    pub fn note_internet_round(&self, any_succeeded: bool, any_tried: bool) {
+        if !any_tried {
+            return;
+        }
+        let mut until = self.internet_down_until.lock().unwrap();
+        *until = if any_succeeded {
+            None
+        } else {
+            Some(std::time::Instant::now() + INTERNET_DOWN_FOR)
+        };
+    }
+
+    /// The shared per-peer relay pool, for building a mesh source against a
+    /// specific holder.
+    pub fn peer_relays(&self) -> Arc<crate::peer_relay::PeerRelayPool> {
+        self.peer_relays.clone()
     }
 
     /// The event store (shared), for the mesh WS proxy in front of it.
@@ -692,7 +869,7 @@ impl Content {
             .unwrap_or_default()
     }
 
-    // --- active version (what the gateway serves; docs/design/nsite-updates.md §1) ---
+    // --- active version (what the gateway serves; docs/design/nsite/nsite-updates.md §1) ---
 
     /// The backend the gateway reads: serves the active (fully-downloaded) version,
     /// not necessarily the relay's newest.
@@ -819,7 +996,7 @@ impl Content {
     // --- site entry ---
 
     /// Ensure a site is present, syncing if needed, updating its `siteStatus`.
-    /// Source order (`docs/design/nsite-layer.md` §5): local → the **holder**'s
+    /// Source order (`docs/design/nsite/nsite-layer.md` §5): local → the **holder**'s
     /// relay/Blossom over the mesh (whoever shared it) → the public IP fallback.
     /// `holder` is the sharer's device npub from a share QR (`None` for a pasted
     /// link). Safe to call repeatedly; meant to be `spawn`ed, never awaited under
@@ -1039,15 +1216,17 @@ impl Content {
     pub fn add_to_library(&self, addr: &SiteAddr, title: Option<&str>, added_at: u64) {
         let mut lib = self.library.lock().unwrap();
         let npub = addr.author.to_bech32().unwrap_or_default();
-        if let Some(item) = lib
-            .iter_mut()
-            .find(|i| i.author_npub == npub && i.d_tag == addr.d_tag)
-        {
+        if let Some(item) = lib.iter_mut().find(|i| {
+            i.kind == LibraryKind::Nsite && i.author_npub == npub && i.d_tag == addr.d_tag
+        }) {
             item.pinned = true;
             if let Some(t) = title {
                 item.title = t.to_string();
             }
         } else {
+            // Matched on kind as well as `(author, d)`: an author may publish
+            // an nsite and a napplet under the same `d` tag, and they are two
+            // Library entries, not one entry that changes kind.
             lib.push(LibraryItem {
                 author_npub: npub,
                 d_tag: addr.d_tag.clone(),
@@ -1055,6 +1234,11 @@ impl Content {
                 url_host: addr.host_label(),
                 pinned: true,
                 added_at,
+                kind: LibraryKind::Nsite,
+                granted: Vec::new(),
+                denied: Vec::new(),
+                pointer: String::new(),
+                reviewed: Vec::new(),
             });
         }
         let snapshot = lib.clone();
@@ -1062,10 +1246,141 @@ impl Content {
         save_library(&self.library_path, &snapshot);
     }
 
+    /// Add or update a napplet's Library entry, recording what install review
+    /// granted it.
+    ///
+    /// Re-adding an already-installed napplet **replaces** its grants rather
+    /// than merging: the review screen shows the whole set the user is agreeing
+    /// to, so what they saw is what is stored. Merging would let a second
+    /// install quietly accumulate capabilities across two screens neither of
+    /// which showed the total. `requires` is the declared list that screen
+    /// showed; it is recorded as [`LibraryItem::reviewed`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_napplet_to_library(
+        &self,
+        author_npub: &str,
+        d_tag: Option<&str>,
+        title: Option<&str>,
+        shell_host: &str,
+        granted: Vec<String>,
+        requires: Vec<String>,
+        pointer: &str,
+        added_at: u64,
+    ) {
+        let mut lib = self.library.lock().unwrap();
+        if let Some(item) = lib.iter_mut().find(|i| {
+            i.kind == LibraryKind::Napplet
+                && i.author_npub == author_npub
+                && i.d_tag.as_deref() == d_tag
+        }) {
+            item.pinned = true;
+            item.granted = granted;
+            // A fresh review is a fresh decision: what was switched off before
+            // is on the table again, and the screen showed the whole set —
+            // which is also the new reviewed list.
+            item.denied = Vec::new();
+            item.reviewed = requires;
+            item.url_host = shell_host.to_string();
+            if !pointer.is_empty() {
+                item.pointer = pointer.to_string();
+            }
+            if let Some(t) = title {
+                item.title = t.to_string();
+            }
+        } else {
+            lib.push(LibraryItem {
+                author_npub: author_npub.to_string(),
+                d_tag: d_tag.map(str::to_string),
+                title: title.unwrap_or("").to_string(),
+                url_host: shell_host.to_string(),
+                pinned: true,
+                added_at,
+                kind: LibraryKind::Napplet,
+                granted,
+                denied: Vec::new(),
+                pointer: pointer.to_string(),
+                reviewed: requires,
+            });
+        }
+        let snapshot = lib.clone();
+        drop(lib);
+        save_library(&self.library_path, &snapshot);
+    }
+
+    /// Replace a napplet's recorded grants — both decision sets. Used when an
+    /// open widened them to a reviewed domain this build newly implements, and
+    /// when a switch on the sheet moves a domain between the two. The reviewed
+    /// list is left alone: only install review rewrites it.
+    pub fn set_napplet_grants(
+        &self,
+        author_npub: &str,
+        d_tag: Option<&str>,
+        grants: NappletGrants,
+    ) {
+        let mut lib = self.library.lock().unwrap();
+        let Some(item) = lib.iter_mut().find(|i| {
+            i.kind == LibraryKind::Napplet
+                && i.author_npub == author_npub
+                && i.d_tag.as_deref() == d_tag
+        }) else {
+            return;
+        };
+        item.granted = grants.granted;
+        item.denied = grants.denied;
+        let snapshot = lib.clone();
+        drop(lib);
+        save_library(&self.library_path, &snapshot);
+    }
+
+    /// What a napplet was granted and what it was refused, or `None` for one
+    /// that is not installed.
+    ///
+    /// An uninstalled napplet getting `None` is the safe answer, not an
+    /// oversight: it still opens, and gets nothing but the mandatory handshake
+    /// — and, unlike an installed one, nothing it declares is granted at open.
+    pub fn napplet_grants(&self, author_npub: &str, d_tag: Option<&str>) -> Option<NappletGrants> {
+        self.library
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|i| {
+                i.kind == LibraryKind::Napplet
+                    && i.author_npub == author_npub
+                    && i.d_tag.as_deref() == d_tag
+            })
+            .map(|i| NappletGrants {
+                granted: i.granted.clone(),
+                denied: i.denied.clone(),
+                reviewed: i.reviewed.clone(),
+            })
+    }
+
+    /// Unpin a napplet and drop its grants.
+    ///
+    /// The grants go with the entry: a napplet re-added later must go through
+    /// review again rather than inheriting what a previous install agreed to.
+    pub fn forget_napplet(&self, author_npub: &str, d_tag: Option<&str>) {
+        let mut lib = self.library.lock().unwrap();
+        lib.retain(|i| {
+            !(i.kind == LibraryKind::Napplet
+                && i.author_npub == author_npub
+                && i.d_tag.as_deref() == d_tag)
+        });
+        let snapshot = lib.clone();
+        drop(lib);
+        save_library(&self.library_path, &snapshot);
+    }
+
+    /// Drop an **nsite** from the Library. Kind-aware: an author may publish
+    /// an nsite and a napplet under one `d` tag, and forgetting the site must
+    /// leave the napplet — and its grants and pointer — where they are.
+    /// `forget_napplet` is the napplet's remover.
     pub fn remove_from_library(&self, addr: &SiteAddr) {
         let npub = addr.author.to_bech32().unwrap_or_default();
         let mut lib = self.library.lock().unwrap();
-        lib.retain(|i| !(i.author_npub == npub && i.d_tag == addr.d_tag));
+        lib.retain(|i| {
+            !(i.kind == LibraryKind::Nsite && i.author_npub == npub && i.d_tag == addr.d_tag)
+        });
         let snapshot = lib.clone();
         drop(lib);
         save_library(&self.library_path, &snapshot);
@@ -1134,6 +1449,50 @@ impl Content {
                 Err(_) => {}
             }
         }
+        self.refresh_napplet_status().await;
+    }
+
+    /// Recompute [`NappletStatusView`] for every installed napplet: ready when
+    /// the served manifest and its index blob are both local, missing when not.
+    pub async fn refresh_napplet_status(&self) {
+        let napplets: Vec<LibraryItem> = self
+            .library_snapshot()
+            .into_iter()
+            .filter(|i| i.kind == LibraryKind::Napplet)
+            .collect();
+        let mut fresh = HashMap::new();
+        for item in napplets {
+            let ready = match self.napplet_keep_set(&item).await {
+                Some((_, index)) => self.blobs.has(&index).await,
+                None => false,
+            };
+            let (state, message) = if ready {
+                ("ready", "Ready")
+            } else {
+                ("missing", "Not on this phone — hold to reload")
+            };
+            fresh.insert(
+                item.url_host.clone(),
+                NappletStatusView {
+                    host: item.url_host.clone(),
+                    state: state.to_string(),
+                    message: message.to_string(),
+                },
+            );
+        }
+        *self.napplet_status.lock().unwrap() = fresh;
+    }
+
+    pub fn napplet_status_snapshot(&self) -> Vec<NappletStatusView> {
+        let mut out: Vec<NappletStatusView> = self
+            .napplet_status
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| a.host.cmp(&b.host));
+        out
     }
 
     // --- circle (paired peers we pull from) ---
@@ -1199,7 +1558,7 @@ impl Content {
     /// so a routed `ws://<npub>.fips:4870` dial reaches any of them. A member
     /// who is genuinely offline costs one bounded dial (the callers time out)
     /// and is then held off by the per-peer backoff in [`crate::peer_relay`].
-    /// See `docs/design/event-gossip.md`.
+    /// See `docs/design/core/event-gossip.md`.
     pub fn circle_npubs(&self) -> Vec<String> {
         self.circle
             .lock()
@@ -1663,6 +2022,29 @@ impl Content {
     pub fn keepwarm_tick(self: &Arc<Self>) {
         // Cheap, and the only clock the transfer state machine has.
         self.sweep_file_transfers();
+        let resend = self.stalled_file_messages(file_transfer::now_secs());
+        if !resend.is_empty() {
+            let content = Arc::clone(self);
+            tokio::spawn(async move {
+                for (peer_npub, message) in resend {
+                    let Ok(target) = PublicKey::from_bech32(&peer_npub) else {
+                        continue;
+                    };
+                    let transfer_id = message.transfer_id().to_string();
+                    match content
+                        .send_file_message(&target, &peer_npub, message)
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::info!(transfer = %transfer_id, "file share: re-sent pending message")
+                        }
+                        Err(e) => {
+                            tracing::debug!(transfer = %transfer_id, error = %e, "file share: re-send failed")
+                        }
+                    }
+                }
+            });
+        }
         let circle: HashSet<String> = self.circle_npubs().into_iter().collect();
         for npub in &circle {
             if fips::PeerIdentity::from_npub(npub).is_ok() {
@@ -1778,6 +2160,7 @@ impl Content {
             key_b64: Some(file_transfer::encode_key(&key)),
             ciphertext_size: package.len() as u64,
             expires_at,
+            last_resend_at: 0,
         });
         let sender_npub = keys.public_key().to_bech32()?;
         let message = FileMessage::Offer {
@@ -1948,6 +2331,7 @@ impl Content {
                     key_b64: None,
                     ciphertext_size: 0,
                     expires_at,
+                    last_resend_at: 0,
                 });
             }
             FileMessage::Response {
@@ -2002,6 +2386,31 @@ impl Content {
                 // with a `ready`, and the file would be fetched, decrypted and
                 // published to Downloads without anyone ever tapping Accept.
                 if !self.transfer_in_state(&transfer_id, "incoming", &sender_npub, &["accepted"]) {
+                    // A `ready` for a transfer we already finished means our
+                    // `complete` never reached the sender: answer it again so
+                    // their row stops retrying and clears.
+                    if self.was_completed_incoming(&transfer_id, &sender_npub) {
+                        let content = Arc::clone(self);
+                        tokio::spawn(async move {
+                            if let Err(e) = content.send_complete(&transfer_id, &sender_npub).await
+                            {
+                                tracing::debug!(transfer = %transfer_id, error = %e, "file share: repeat completion failed");
+                            }
+                        });
+                        return;
+                    }
+                    // The sender retries `ready` until it hears `complete`, so
+                    // a repeat while the download is already running is the
+                    // expected case, not an out-of-order message.
+                    if self.transfer_in_state(
+                        &transfer_id,
+                        "incoming",
+                        &sender_npub,
+                        &["downloading"],
+                    ) {
+                        tracing::debug!(transfer_id, "file ready repeated while downloading");
+                        return;
+                    }
                     tracing::warn!(
                         transfer_id,
                         "file ready arrived before the offer was accepted"
@@ -2068,13 +2477,13 @@ impl Content {
                 transfer_id,
                 recipient_npub,
                 ..
-            } if recipient_npub == own_npub => {
-                if self.has_file_transfer(&transfer_id, "outgoing", &sender_npub) {
-                    // A completed send has nothing left to tell the user, so this
-                    // is the one terminal state that still clears itself.
-                    self.set_file_status(&transfer_id, "completed", "");
-                    self.forget_file_transfer(&transfer_id);
-                }
+            } if recipient_npub == own_npub
+                && self.has_file_transfer(&transfer_id, "outgoing", &sender_npub) =>
+            {
+                // A completed send has nothing left to tell the user, so this
+                // is the one terminal state that still clears itself.
+                self.set_file_status(&transfer_id, "completed", "");
+                self.forget_file_transfer(&transfer_id);
             }
             _ => {}
         }
@@ -2170,27 +2579,49 @@ impl Content {
         } else {
             declared_size.min(file_transfer::MAX_PACKAGE_BYTES)
         };
-        crate::dns_intercept::warm_route(sender_npub);
         let base = crate::ip_source::mesh_blossom_url(sender_npub);
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(120))
-            .build()?;
-        let mut response = client.get(format!("{base}/{blob_hash}")).send().await?;
-        if !response.status().is_success() {
-            anyhow::bail!("peer Blossom returned {}", response.status());
-        }
-        if let Some(advertised) = response.content_length() {
-            if advertised > limit {
-                anyhow::bail!("peer offered {advertised} bytes but declared {limit}");
+        let url = format!("{base}/{blob_hash}");
+        // Nothing about this download is bounded by total time any more, so the
+        // row's own state is what ends it: the user cancelling, or the sweeper
+        // failing an expired offer, must stop the fetch rather than have it
+        // finish minutes later and publish a file that was called off.
+        let still_wanted =
+            || self.transfer_in_state(transfer_id, "incoming", sender_npub, &["downloading"]);
+        // A mesh hop can be slow and can drop mid-body, so the fetch is bounded
+        // by silence rather than by total time, and a cut connection is tried
+        // again a few times before the transfer is failed.
+        let mut attempt = 0;
+        let package = loop {
+            attempt += 1;
+            // Re-warmed per attempt: a retry is usually a link that just
+            // flapped, and the route it flapped away from is the stale one.
+            crate::dns_intercept::warm_route(sender_npub);
+            match Self::fetch_package(
+                &url,
+                limit,
+                file_transfer::DOWNLOAD_IDLE_TIMEOUT,
+                &still_wanted,
+            )
+            .await
+            {
+                Ok(package) => break package,
+                Err(e) if attempt < file_transfer::DOWNLOAD_ATTEMPTS && is_transport_error(&e) => {
+                    tracing::warn!(
+                        transfer = %transfer_id,
+                        attempt,
+                        error = %e,
+                        "file share: download interrupted, retrying"
+                    );
+                    tokio::time::sleep(file_transfer::DOWNLOAD_RETRY_DELAY).await;
+                    if !still_wanted() {
+                        anyhow::bail!("transfer is no longer being downloaded");
+                    }
+                }
+                Err(e) => return Err(e),
             }
-        }
-        let mut package: Vec<u8> = Vec::with_capacity(limit.min(1024 * 1024) as usize);
-        while let Some(chunk) = response.chunk().await? {
-            if package.len() as u64 + chunk.len() as u64 > limit {
-                anyhow::bail!("peer sent more than the {limit} bytes it declared");
-            }
-            package.extend_from_slice(&chunk);
+        };
+        if !still_wanted() {
+            anyhow::bail!("transfer is no longer being downloaded");
         }
         if file_transfer::sha256_hex(&package) != blob_hash {
             anyhow::bail!("downloaded encrypted blob hash mismatch");
@@ -2208,19 +2639,106 @@ impl Content {
             r.view.updated_at = file_transfer::now_secs();
             r.key_b64 = None;
         });
-        let target = PublicKey::from_bech32(sender_npub)?;
-        let message = FileMessage::Complete {
-            transfer_id: transfer_id.to_string(),
-            sender_npub: own_npub,
-            recipient_npub: sender_npub.to_string(),
-        };
-        if let Err(e) = self.send_file_message(&target, sender_npub, message).await {
+        self.remember_completed_incoming(transfer_id, sender_npub);
+        if let Err(e) = self.send_complete(transfer_id, sender_npub).await {
             // The receiver's local copy is already complete. A failed sender
             // acknowledgement must not turn this back into a failed transfer
             // or prevent Android from publishing it to Downloads.
             tracing::warn!(transfer = %transfer_id, error = %e, "file share: completion acknowledgement failed");
         }
         Ok(())
+    }
+
+    /// One download of the encrypted package: bounded against `limit` before
+    /// and while the body streams in, and failed if the peer goes quiet for
+    /// [`file_transfer::DOWNLOAD_IDLE_TIMEOUT`] — not by total duration, which
+    /// a large file over a slow Bluetooth hop legitimately exceeds.
+    ///
+    /// `still_wanted` is asked between chunks, and answering `false` ends the
+    /// fetch. With no total bound, a peer trickling a byte before every idle
+    /// timeout would otherwise hold this task and its buffer for as long as it
+    /// liked, whatever the row said.
+    async fn fetch_package(
+        url: &str,
+        limit: u64,
+        idle: Duration,
+        still_wanted: &(dyn Fn() -> bool + Sync),
+    ) -> anyhow::Result<Vec<u8>> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .build()?;
+        let mut response = tokio::time::timeout(idle, client.get(url).send())
+            .await
+            .map_err(|_| anyhow::anyhow!("peer Blossom did not answer"))??;
+        if !response.status().is_success() {
+            anyhow::bail!("peer Blossom returned {}", response.status());
+        }
+        if let Some(advertised) = response.content_length() {
+            if advertised > limit {
+                anyhow::bail!("peer offered {advertised} bytes but declared {limit}");
+            }
+        }
+        let mut package: Vec<u8> = Vec::with_capacity(limit.min(1024 * 1024) as usize);
+        loop {
+            let chunk = tokio::time::timeout(idle, response.chunk())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("download stalled: no data for {}s", idle.as_secs())
+                })??;
+            let Some(chunk) = chunk else { break };
+            if package.len() as u64 + chunk.len() as u64 > limit {
+                anyhow::bail!("peer sent more than the {limit} bytes it declared");
+            }
+            package.extend_from_slice(&chunk);
+            if !still_wanted() {
+                anyhow::bail!("transfer is no longer being downloaded");
+            }
+        }
+        Ok(package)
+    }
+
+    /// Tell the sender their file arrived. Sent once on completion and again
+    /// for every retried `ready`, since the first may have been dropped.
+    async fn send_complete(&self, transfer_id: &str, sender_npub: &str) -> anyhow::Result<()> {
+        let own_npub = {
+            let keys = self
+                .device_keys
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
+            keys.public_key().to_bech32()?
+        };
+        let target = PublicKey::from_bech32(sender_npub)?;
+        let message = FileMessage::Complete {
+            transfer_id: transfer_id.to_string(),
+            sender_npub: own_npub,
+            recipient_npub: sender_npub.to_string(),
+        };
+        self.send_file_message(&target, sender_npub, message).await
+    }
+
+    fn remember_completed_incoming(&self, transfer_id: &str, peer_npub: &str) {
+        let snapshot = {
+            let mut done = self.completed_incoming.lock().unwrap();
+            done.retain(|(id, _)| id != transfer_id);
+            done.push_back((transfer_id.to_string(), peer_npub.to_string()));
+            while done.len() > file_transfer::MAX_TRACKED_TRANSFERS {
+                done.pop_front();
+            }
+            done.clone()
+        };
+        save_completed_incoming(&self.completed_incoming_path, &snapshot);
+    }
+
+    /// Whether `transfer_id` is one we finished **with this peer**. Matching on
+    /// the id alone would answer any Circle member who guessed it.
+    pub(crate) fn was_completed_incoming(&self, transfer_id: &str, peer_npub: &str) -> bool {
+        self.completed_incoming
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(id, peer)| id == transfer_id && peer == peer_npub)
     }
 
     async fn send_file_message(
@@ -2420,6 +2938,109 @@ impl Content {
             self.set_file_status(&id, "failed", "timed out waiting for the other phone");
             self.clear_transfer_secrets(&id);
         }
+    }
+
+    /// The control messages a stalled transfer is still waiting to have heard.
+    ///
+    /// Every control message is a single push, and the push plane drops frames
+    /// while a peer is in dial backoff — so an accept pressed during a BLE flap
+    /// never arrives and the sender waits out the whole offer TTL. Each state
+    /// that waits on the *other* side is re-sent from what the record already
+    /// holds once it has sat for [`file_transfer::RESEND_AFTER_SECS`] since the
+    /// last step or retry: an outgoing `offered` re-sends the offer, an incoming
+    /// `accepted` the accept, an outgoing `ready` the ready. Safe to repeat —
+    /// every receiving handler is gated on the state it advances from, so a
+    /// duplicate of a message that already landed is ignored. Stamps the rows
+    /// it returns; the caller sends.
+    pub(crate) fn stalled_file_messages(&self, now: u64) -> Vec<(String, FileMessage)> {
+        let keys = self.device_keys.lock().unwrap().clone();
+        let Some(keys) = keys else {
+            return Vec::new();
+        };
+        let Ok(own_npub) = keys.public_key().to_bech32();
+        // Taken before the transfer lock, never under it: every other path
+        // takes the Circle lock first.
+        let circle: HashSet<String> = self.circle_npubs().into_iter().collect();
+        let mut out = Vec::new();
+        let snapshot = {
+            let mut records = self.file_transfers.lock().unwrap();
+            for r in records.iter_mut() {
+                let since = r.view.updated_at.max(r.last_resend_at);
+                if r.expires_at <= now
+                    || now.saturating_sub(since) < file_transfer::RESEND_AFTER_SECS
+                {
+                    continue;
+                }
+                // Removing someone stops us talking to them. Their side drops a
+                // message from a non-Circle sender anyway; retrying at a person
+                // just removed is the part that would be wrong.
+                if !circle.contains(&r.view.peer_npub) {
+                    continue;
+                }
+                let state = (r.view.direction.as_str(), r.view.status.as_str());
+                if !matches!(
+                    state,
+                    ("outgoing", "offered") | ("incoming", "accepted") | ("outgoing", "ready")
+                ) {
+                    continue;
+                }
+                // Stamped before the message is built, so a row we cannot
+                // rebuild waits out the window like any other rather than
+                // retrying the same failing work every tick.
+                r.last_resend_at = now;
+                let message = match state {
+                    ("outgoing", "offered") => FileMessage::Offer {
+                        transfer_id: r.view.id.clone(),
+                        sender_npub: own_npub.clone(),
+                        recipient_npub: r.view.peer_npub.clone(),
+                        filename: r.view.name.clone(),
+                        mime: r.view.mime.clone(),
+                        size: r.view.size,
+                        issued_at: r.expires_at.saturating_sub(file_transfer::OFFER_TTL_SECS),
+                        expires_at: r.expires_at,
+                    },
+                    ("incoming", "accepted") => FileMessage::Response {
+                        transfer_id: r.view.id.clone(),
+                        sender_npub: own_npub.clone(),
+                        recipient_npub: r.view.peer_npub.clone(),
+                        accepted: true,
+                        reason: None,
+                    },
+                    ("outgoing", "ready") => {
+                        let (Some(key_b64), Ok(target)) = (
+                            r.key_b64.as_deref(),
+                            PublicKey::from_bech32(&r.view.peer_npub),
+                        ) else {
+                            continue;
+                        };
+                        let Ok(key) = file_transfer::decode_key(key_b64) else {
+                            continue;
+                        };
+                        let Ok(key_wrap) = file_transfer::wrap_key(&keys, &target, &key) else {
+                            continue;
+                        };
+                        FileMessage::Ready {
+                            transfer_id: r.view.id.clone(),
+                            sender_npub: own_npub.clone(),
+                            recipient_npub: r.view.peer_npub.clone(),
+                            filename: r.view.name.clone(),
+                            mime: r.view.mime.clone(),
+                            size: r.view.size,
+                            blob_hash: r.view.blob_hash.clone(),
+                            ciphertext_size: r.ciphertext_size,
+                            key_wrap,
+                        }
+                    }
+                    _ => continue,
+                };
+                out.push((r.view.peer_npub.clone(), message));
+            }
+            records.clone()
+        };
+        if !out.is_empty() {
+            save_file_transfers(&self.file_transfers_path, &snapshot);
+        }
+        out
     }
 
     /// Cancel a transfer the user no longer wants and tell the other phone, so
@@ -2632,14 +3253,43 @@ impl Content {
         self.discovered.lock().unwrap().clone()
     }
 
-    // --- nsite updates (docs/design/nsite-updates.md) ---
+    // --- nsite updates (docs/design/nsite/nsite-updates.md) ---
 
     /// P-U1 manual update check (online). Polls online relays for newer manifests
     /// of every Library site in **one combined REQ per relay** (deduplicated, read
     /// until EOSE), and for each newer-than-active candidate stages its blobs and
     /// activates when complete. Spawn-not-block; the UI polls `siteStatus`.
     pub async fn check_updates(self: Arc<Self>) {
+        self.check_updates_with(async { None }).await
+    }
+
+    /// Check nsites and, through `napplets`, napplets — one "Checking…" and
+    /// one result toast for both. `napplets` resolves to
+    /// `Some((updated, checked))`, or `None` when there are none to check;
+    /// the napplet path lives in `napplet.rs` because it needs the host.
+    pub async fn check_updates_with<F>(self: Arc<Self>, napplets: F)
+    where
+        F: std::future::Future<Output = Option<(usize, usize)>>,
+    {
         self.set_update_check(true, "Checking for updates…");
+        let (nsites, napplets) = tokio::join!(self.clone().check_nsite_updates(), napplets);
+        let msg = match (nsites, napplets) {
+            (NsiteCheck::Nothing, Some((updated, checked))) => {
+                napplet_update_message(updated, checked)
+            }
+            (NsiteCheck::Nothing, None) => "No apps to check".to_string(),
+            (NsiteCheck::Done(msg), None) => msg,
+            (NsiteCheck::Done(msg), Some((updated, checked))) => {
+                format!("{msg}; {}", napplet_update_message(updated, checked))
+            }
+        };
+        self.finish_update_check(&msg);
+    }
+
+    /// The nsite half of an update check. Progress lands in `update_check`
+    /// as it goes; the final message is returned rather than posted, so the
+    /// caller can join it with the napplet half.
+    async fn check_nsite_updates(self: Arc<Self>) -> NsiteCheck {
         // Tracked sites + the union of their authors (one filter covers all).
         let addrs: Vec<SiteAddr> = self
             .library_snapshot()
@@ -2647,8 +3297,7 @@ impl Content {
             .filter_map(library_addr)
             .collect();
         if addrs.is_empty() {
-            self.finish_update_check("No apps to check");
-            return;
+            return NsiteCheck::Nothing;
         }
         let authors: Vec<String> = {
             let mut s: HashSet<String> = HashSet::new();
@@ -2659,7 +3308,7 @@ impl Content {
         };
 
         // Query set, one combined REQ per relay read until EOSE
-        // (docs/design/nsite-updates.md §3.2):
+        // (docs/design/nsite/nsite-updates.md §3.2):
         //  - connected peers' mesh relays, carrying one more hop so the check reaches
         //    2 hops just like discovery (their peers' manifests come back too),
         //    which rides the envelope rather than the filter;
@@ -2687,8 +3336,7 @@ impl Content {
             crate::ip_source::default_relays()
         };
         if mesh_peers.is_empty() && online.is_empty() {
-            self.finish_update_check("No peers or relays to check");
-            return;
+            return NsiteCheck::Done("No peers or relays to check".to_string());
         }
         let mesh_count = mesh_peers.len();
         tracing::info!(
@@ -2789,8 +3437,7 @@ impl Content {
             "update check: results"
         );
         if candidates.is_empty() {
-            self.finish_update_check("All apps are up to date");
-            return;
+            return NsiteCheck::Done("All apps are up to date".to_string());
         }
 
         // Download + activate each, concurrently. Reflect progress, then report.
@@ -2810,7 +3457,7 @@ impl Content {
         } else {
             format!("{applied} of {n} updated; some downloads failed")
         };
-        self.finish_update_check(&msg);
+        NsiteCheck::Done(msg)
     }
 
     fn set_update_check(&self, checking: bool, message: &str) {
@@ -2957,7 +3604,7 @@ impl Content {
     }
 
     /// A manifest landed in our relay over the mesh (a peer's push, forwarded by
-    /// the gossiper). Propagate it like any event (`docs/design/nsite-updates.md`
+    /// the gossiper). Propagate it like any event (`docs/design/nsite/nsite-updates.md`
     /// §4); if it's one of our installed sites, download its blobs from the sender
     /// and activate. Forwarding never waits on the download for sites we don't run.
     pub async fn on_manifest_event(self: Arc<Self>, event: Event, inbound: Inbound) {
@@ -3054,15 +3701,18 @@ impl Content {
         }
     }
 
-    /// Whether a site is in our Library (we "run" it, so we're interested in its
-    /// updates — download before forwarding).
+    /// Whether an **nsite** is in our Library (we "run" it, so we're interested
+    /// in its updates — download before forwarding). Kind-aware: a napplet
+    /// entry under the same `(author, d)` is not the nsite, and must not make
+    /// the nsite's manifest look installed — that staged every blob of an
+    /// uninstalled site and put its tile on the grid.
     fn is_in_library(&self, addr: &SiteAddr) -> bool {
         let npub = addr.author.to_bech32().unwrap_or_default();
         self.library
             .lock()
             .unwrap()
             .iter()
-            .any(|i| i.author_npub == npub && i.d_tag == addr.d_tag)
+            .any(|i| i.kind == LibraryKind::Nsite && i.author_npub == npub && i.d_tag == addr.d_tag)
     }
 
     // --- wipe ---
@@ -3110,7 +3760,13 @@ impl Content {
     /// each pinned site and every blob it references survive, so installed apps keep
     /// working offline; everything else — unpinned opened sites, discovered
     /// listings, staged updates — is dropped. Identity and Circle are untouched.
-    pub async fn wipe_cache(&self) -> anyhow::Result<()> {
+    ///
+    /// `keep_author` is the user key's pubkey, when there is one: its kind 0
+    /// and kind 10002 survive too. They were published once, at first napplet
+    /// use, and are never republished — `user.nsec` still exists after a wipe,
+    /// so nothing regenerates them — and without them the user's own outbox
+    /// plan falls back and every napplet sees a bare pubkey.
+    pub async fn wipe_cache(&self, keep_author: Option<PublicKey>) -> anyhow::Result<()> {
         // Pinned Library entries are the apps we must keep working.
         let pinned: Vec<LibraryItem> = self
             .library
@@ -3128,6 +3784,21 @@ impl Content {
         let mut keep_active: HashSet<String> = HashSet::new();
         let backend = self.active_backend();
         for item in &pinned {
+            // A napplet is one manifest and one blob. Both stay, or the tile
+            // stays and the app behind it is gone — which is what happened the
+            // first time "Delete cache" met an installed napplet.
+            if item.kind == LibraryKind::Napplet {
+                if let Some((event, index_hash)) = self.napplet_keep_set(item).await {
+                    keep_events.insert(event.id.to_bytes());
+                    keep_blobs.insert(index_hash);
+                    keep_active.insert(manifest_key(
+                        event.kind.as_u16(),
+                        &event.pubkey,
+                        item.d_tag.as_deref(),
+                    ));
+                }
+                continue;
+            }
             let Some(addr) = library_addr(item) else {
                 continue;
             };
@@ -3149,7 +3820,23 @@ impl Content {
         }
 
         if let Some(store) = &self.relay_store {
-            store.retain_events(&keep_events);
+            // The user's own profile and relay list, by the pubkey alone: the
+            // store keeps one of each per author, so this is at most two
+            // events. Read from the embedded store itself — it is the only
+            // thing being retained.
+            if let Some(pk) = keep_author {
+                let own = Filter::new()
+                    .author(pk)
+                    .kinds([Kind::Metadata, Kind::RelayList]);
+                match store.query(&[own]).await {
+                    Ok(events) => keep_events.extend(events.iter().map(|e| e.id.to_bytes())),
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "wipe_cache: could not read the user's own profile and relay list; they will go"
+                    ),
+                }
+            }
+            store.retain_events(&keep_events).await;
         }
         if let Some(store) = &self.blobs_local {
             store.retain_blobs(&keep_blobs);
@@ -3178,6 +3865,29 @@ impl Content {
         };
         save_active(&self.active_path, &active_snapshot);
         Ok(())
+    }
+
+    /// The manifest event and index-blob hash an installed napplet is served
+    /// from, for the keep-sets: the active manifest when one is pinned, else
+    /// the newest in the slot.
+    async fn napplet_keep_set(&self, item: &LibraryItem) -> Option<(Event, String)> {
+        use nostr::nips::nip19::FromBech32;
+        let author = nostr::PublicKey::from_bech32(&item.author_npub).ok()?;
+        let kind = match item.d_tag {
+            Some(_) => myco_napplet_runtime::KIND_NAMED,
+            None => myco_napplet_runtime::KIND_ROOT,
+        };
+        let event = nsite_deck::seams::newest_in_slot(
+            &self.active_backend(),
+            kind,
+            &author,
+            item.d_tag.as_deref(),
+        )
+        .await
+        .ok()??;
+        let manifest = myco_napplet_runtime::NappletManifest::from_event(event.clone()).ok()?;
+        let index = manifest.index_entry()?.sha256.clone();
+        Some((event, index))
     }
 
     // --- snapshots for state() ---
@@ -3393,9 +4103,23 @@ fn frame_response(resp: &GatewayResponse) -> Vec<u8> {
     out
 }
 
-/// Resolve a Library entry back to a site address (its npub may fail to parse if
-/// the file was hand-edited; such entries are skipped).
+/// Resolve a Library entry back to an **nsite** address.
+///
+/// Returns `None` for a napplet. A napplet shares the Library with nsites but
+/// nothing else: it has no 15128/35128 manifest, so handing one to the nsite
+/// sync engine starts a sync that can never finish and leaves a tile stuck
+/// syncing forever beside the napplet's own.
+///
+/// Every path from the Library into nsite machinery goes through here, which is
+/// why the check lives here rather than at each caller — a new caller gets the
+/// exclusion for free instead of having to remember it.
+///
+/// Also returns `None` when the npub fails to parse, which a hand-edited file
+/// can produce.
 fn library_addr(item: &LibraryItem) -> Option<SiteAddr> {
+    if item.kind != LibraryKind::Nsite {
+        return None;
+    }
     let author = PublicKey::from_bech32(&item.author_npub).ok()?;
     Some(SiteAddr {
         author,
@@ -3487,6 +4211,18 @@ fn save_outbound_pairs(path: &Path, items: &[OutboundPairView]) {
     }
 }
 
+/// Whether a download error is the connection's fault (worth another try)
+/// rather than the peer's answer (a status, a size lie, a hash mismatch).
+fn is_transport_error(error: &anyhow::Error) -> bool {
+    match error.downcast_ref::<reqwest::Error>() {
+        Some(e) => e.is_timeout() || e.is_connect() || e.is_body() || e.is_request(),
+        None => {
+            let text = error.to_string();
+            text.starts_with("download stalled") || text.starts_with("peer Blossom did not answer")
+        }
+    }
+}
+
 fn load_file_transfers(path: &Path) -> Vec<FileTransferRecord> {
     std::fs::read(path)
         .ok()
@@ -3495,6 +4231,20 @@ fn load_file_transfers(path: &Path) -> Vec<FileTransferRecord> {
 }
 
 fn save_file_transfers(path: &Path, items: &[FileTransferRecord]) {
+    if let Ok(json) = serde_json::to_vec(items) {
+        let tmp = path.with_extension("json.tmp");
+        let _ = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path));
+    }
+}
+
+fn load_completed_incoming(path: &Path) -> VecDeque<(String, String)> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_completed_incoming(path: &Path, items: &VecDeque<(String, String)>) {
     if let Ok(json) = serde_json::to_vec(items) {
         let tmp = path.with_extension("json.tmp");
         let _ = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path));
@@ -3512,6 +4262,24 @@ fn save_circle(path: &Path, items: &[CircleContact]) {
     if let Ok(json) = serde_json::to_vec(items) {
         let tmp = path.with_extension("json.tmp");
         let _ = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path));
+    }
+}
+
+#[async_trait]
+impl crate::napplet::ManifestStore for Content {
+    async fn current(
+        &self,
+        kind: u16,
+        author: &PublicKey,
+        d_tag: Option<&str>,
+    ) -> anyhow::Result<Option<Event>> {
+        // The active view substitutes the pinned version for the relay's
+        // newest — the same gate the nsite gateway reads through.
+        nsite_deck::seams::newest_in_slot(&self.active_backend(), kind, author, d_tag).await
+    }
+
+    fn pin(&self, manifest: &Event) {
+        self.set_active(manifest);
     }
 }
 
@@ -3781,6 +4549,7 @@ mod tests {
             key_b64: None,
             ciphertext_size: 0,
             expires_at,
+            last_resend_at: 0,
         }
     }
 
@@ -3830,6 +4599,203 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A slow Bluetooth hop used to fail a large download by hitting a total
+    /// timeout while bytes were still arriving ("error decoding response
+    /// body"). The fetch is now bounded by silence: a body that keeps trickling
+    /// in completes no matter how long it takes, and one that goes quiet fails
+    /// with an error the retry loop recognises as the connection's fault.
+    #[tokio::test]
+    async fn a_download_is_failed_by_silence_not_by_total_time() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            // First request: 8 bytes, drip-fed slower than the old total cap
+            // would scale to. Second: 8 bytes promised, 4 sent, then silence.
+            // Third: another trickle, for the abandoned case. Each is served on
+            // its own task, so the one that goes quiet does not hold up the
+            // next connection.
+            for stalls in [false, true, false] {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n")
+                        .await
+                        .unwrap();
+                    for i in 0..8u8 {
+                        if stalls && i == 4 {
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            break;
+                        }
+                        sock.write_all(&[i]).await.unwrap();
+                        sock.flush().await.unwrap();
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                    }
+                });
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/blob");
+        let idle = Duration::from_millis(600);
+
+        let wanted = || true;
+        let slow = Content::fetch_package(&url, 1024, idle, &wanted)
+            .await
+            .unwrap();
+        assert_eq!(
+            slow,
+            (0..8u8).collect::<Vec<_>>(),
+            "a trickle still completes"
+        );
+
+        let stalled = Content::fetch_package(&url, 1024, idle, &wanted)
+            .await
+            .unwrap_err();
+        assert!(
+            stalled.to_string().starts_with("download stalled"),
+            "silence must fail the fetch: {stalled}"
+        );
+        assert!(is_transport_error(&stalled), "and be retried, not reported");
+        assert!(
+            !is_transport_error(&anyhow::anyhow!("downloaded encrypted blob hash mismatch")),
+            "a wrong answer from the peer is not retried"
+        );
+
+        // Cancelled, or swept after the offer expired: the fetch stops instead
+        // of finishing minutes later and publishing a file nobody wants.
+        let abandoned = Content::fetch_package(&url, 1024, idle, &|| false)
+            .await
+            .unwrap_err();
+        assert!(
+            abandoned.to_string().starts_with("transfer is no longer"),
+            "a row that left `downloading` ends the fetch: {abandoned}"
+        );
+        assert!(
+            !is_transport_error(&abandoned),
+            "and is not treated as a connection fault worth retrying"
+        );
+    }
+
+    /// An accept pressed while the peer's relay link is in dial backoff is
+    /// dropped on the floor, and the sender used to wait out the whole offer
+    /// TTL for it. Each side re-sends the message its state is waiting to have
+    /// heard — but only once the row has sat still for a while, never for a
+    /// finished or expired row, and not again until the window has passed.
+    #[test]
+    fn a_stalled_transfer_resends_its_pending_control_message() {
+        let dir = tmp("file-resend");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+        content.set_device_keys(&Keys::generate().secret_key().to_bech32().unwrap());
+        let peer = Keys::generate().public_key().to_bech32().unwrap();
+        content.add_to_circle(&peer, "peer");
+        let now = 1_000_000;
+        let mut offered = incoming_record("offered", now + 60);
+        offered.view.direction = "outgoing".to_string();
+        offered.view.status = "offered".to_string();
+        offered.view.peer_npub = peer.clone();
+        offered.view.updated_at = now - 30;
+        let mut accepted = incoming_record("accepted", now + 60);
+        accepted.view.status = "accepted".to_string();
+        accepted.view.peer_npub = peer.clone();
+        accepted.view.updated_at = now - 30;
+        let mut fresh = incoming_record("fresh", now + 60);
+        fresh.view.status = "accepted".to_string();
+        fresh.view.peer_npub = peer.clone();
+        fresh.view.updated_at = now - 2;
+        let mut waiting = incoming_record("waiting", now + 60);
+        waiting.view.peer_npub = peer.clone();
+        waiting.view.updated_at = now - 30;
+        let mut expired = incoming_record("expired", now - 1);
+        expired.view.status = "accepted".to_string();
+        expired.view.peer_npub = peer.clone();
+        expired.view.updated_at = now - 30;
+        // Removed from the Circle mid-transfer: we stop talking to them.
+        let removed_peer = Keys::generate().public_key().to_bech32().unwrap();
+        let mut removed = incoming_record("removed", now + 60);
+        removed.view.status = "accepted".to_string();
+        removed.view.peer_npub = removed_peer;
+        removed.view.updated_at = now - 30;
+        for r in [offered, accepted, fresh, waiting, expired, removed] {
+            content.insert_file_transfer(r);
+        }
+
+        let mut resent: Vec<(String, String)> = content
+            .stalled_file_messages(now)
+            .into_iter()
+            .map(|(npub, m)| {
+                let kind = match m {
+                    FileMessage::Offer { .. } => "offer",
+                    FileMessage::Response { accepted: true, .. } => "accept",
+                    _ => "other",
+                };
+                (npub, format!("{}:{kind}", m.transfer_id()))
+            })
+            .collect();
+        resent.sort();
+        assert_eq!(
+            resent,
+            vec![
+                (peer.clone(), "accepted:accept".to_string()),
+                (peer, "offered:offer".to_string())
+            ],
+            "only the rows waiting on the other side, with a peer still in the Circle, \
+             and only once they have stalled"
+        );
+        assert!(
+            content.stalled_file_messages(now + 5).is_empty(),
+            "a retry must not repeat until the window has passed again"
+        );
+        // By now the row that was fresh has stalled as well.
+        assert_eq!(
+            content
+                .stalled_file_messages(now + file_transfer::RESEND_AFTER_SECS)
+                .len(),
+            3,
+            "and repeats once it has"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The receiver forgets a finished row as soon as the shell publishes the
+    /// file, but its `complete` may have been lost and the sender is then
+    /// retrying `ready` against a transfer we no longer track. The id has to
+    /// stay known so that retry is answered, and the memory must not grow
+    /// without bound.
+    #[test]
+    fn a_finished_incoming_transfer_stays_known_after_its_row_is_forgotten() {
+        let dir = tmp("file-completed-memory");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+        let peer = Keys::generate().public_key().to_bech32().unwrap();
+        let other = Keys::generate().public_key().to_bech32().unwrap();
+        assert!(!content.was_completed_incoming("t1", &peer));
+        content.remember_completed_incoming("t1", &peer);
+        content.forget_file_transfer("t1");
+        assert!(
+            content.was_completed_incoming("t1", &peer),
+            "forgetting the row must not forget the id"
+        );
+        assert!(
+            !content.was_completed_incoming("t1", &other),
+            "another Circle member asking about the same id is not answered"
+        );
+        // A restart between publishing the file and the sender giving up must
+        // not cost them the rest of the offer TTL.
+        let reopened = Content::open(&dir).unwrap();
+        assert!(
+            reopened.was_completed_incoming("t1", &peer),
+            "the memory has to survive a restart"
+        );
+        for i in 0..file_transfer::MAX_TRACKED_TRANSFERS {
+            content.remember_completed_incoming(&format!("later-{i}"), &peer);
+        }
+        assert!(
+            !content.was_completed_incoming("t1", &peer),
+            "the oldest id is evicted at the cap"
+        );
+        assert!(content.was_completed_incoming("later-0", &peer));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The control plane is best-effort — `PeerRelayPool::send` drops frames
     /// while a peer is in dial backoff — so a transfer can be left waiting on a
     /// message that will never arrive. The sweeper is the only thing that ends
@@ -3874,7 +4840,7 @@ mod tests {
         std::fs::write(&outbox, b"ciphertext").unwrap();
         content.insert_file_transfer(incoming_record("t1", u64::MAX));
 
-        content.wipe_cache().await.unwrap();
+        content.wipe_cache(None).await.unwrap();
 
         assert!(
             !staged.exists(),
@@ -3975,7 +4941,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn tmp(tag: &str) -> PathBuf {
+    pub(super) fn tmp(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("myco-content-test-{}-{}", std::process::id(), tag))
     }
 
@@ -4068,7 +5034,7 @@ mod tests {
             author: drop.author,
             d_tag: None,
         });
-        content.wipe_cache().await.unwrap();
+        content.wipe_cache(None).await.unwrap();
 
         // The pinned site still serves from local stores; the unpinned one is gone.
         assert_eq!(content.cache_view().relay_events, 1);
@@ -4077,6 +5043,47 @@ mod tests {
         assert_eq!(content.gateway_get(&drop_host, "/", None).await.status, 503);
         assert_eq!(content.library_snapshot().len(), 1);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// "Delete cache" keeps the user's own profile and relay list. They are
+    /// published once, at first napplet use, and `user.nsec` outlives the
+    /// wipe, so nothing would ever publish them again: without this the
+    /// user's outbox plan degrades to fallback and napplets see a bare
+    /// pubkey. The same kinds by anyone else are cache, and go.
+    #[tokio::test]
+    async fn wipe_cache_keeps_the_users_profile_and_relay_list() {
+        let dir = tmp("wipe-own-profile");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+
+        let user = Keys::generate();
+        let other = Keys::generate();
+        let mut own = Vec::new();
+        let mut theirs = Vec::new();
+        for (keys, out) in [(&user, &mut own), (&other, &mut theirs)] {
+            let profile = EventBuilder::new(Kind::Metadata, r#"{"name":"x"}"#)
+                .sign_with_keys(keys)
+                .unwrap();
+            let relays = crate::outbox::own_relay_list(keys).unwrap();
+            for event in [profile, relays] {
+                content.relay().publish(event.clone()).await.unwrap();
+                out.push(event.id);
+            }
+        }
+        assert_eq!(content.cache_view().relay_events, 4);
+
+        content.wipe_cache(Some(user.public_key())).await.unwrap();
+
+        let left = content.relay().query(&[Filter::new()]).await.unwrap();
+        let left: Vec<nostr::EventId> = left.into_iter().map(|e| e.id).collect();
+        for id in &own {
+            assert!(left.contains(id), "the user's own event was wiped");
+        }
+        for id in &theirs {
+            assert!(!left.contains(id), "another author's profile survived");
+        }
+        assert_eq!(left.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4296,5 +5303,239 @@ mod tests {
         assert_eq!(sites[0].state, "unreachable");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod library_kind_tests {
+    use super::tests::tmp;
+    use super::*;
+    use nostr::nips::nip19::ToBech32;
+
+    fn entry(kind: LibraryKind, d_tag: &str) -> LibraryItem {
+        LibraryItem {
+            author_npub: "npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr"
+                .to_string(),
+            d_tag: Some(d_tag.to_string()),
+            title: String::new(),
+            url_host: String::new(),
+            pinned: true,
+            added_at: 0,
+            kind,
+            granted: Vec::new(),
+            denied: Vec::new(),
+            pointer: String::new(),
+            reviewed: Vec::new(),
+        }
+    }
+
+    /// A napplet must never reach the nsite sync engine. It has no 15128/35128
+    /// manifest, so a sync started for one never finishes and leaves a tile
+    /// stuck syncing beside the napplet's own — which is exactly what happened
+    /// the first time a napplet was installed on a device.
+    #[test]
+    fn a_napplet_is_not_an_nsite_address() {
+        assert!(library_addr(&entry(LibraryKind::Napplet, "dingdong")).is_none());
+        assert!(library_addr(&entry(LibraryKind::Nsite, "bitchat")).is_some());
+    }
+
+    /// An author may publish an nsite and a napplet under the same `d` tag.
+    /// They are two Library entries; adding one must not turn the other into
+    /// it — which stopped the nsite syncing and left the napplet's tile
+    /// pointing at an nsite host.
+    #[tokio::test]
+    async fn an_nsite_and_a_napplet_with_one_d_tag_are_two_entries() {
+        let dir = tmp("library-kinds");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+        let author = nostr::Keys::generate().public_key();
+        let npub = author.to_bech32().unwrap();
+        let addr = SiteAddr {
+            author,
+            d_tag: Some("bitchat".into()),
+        };
+
+        content.add_to_library(&addr, Some("Bitchat site"), 1);
+        content.add_napplet_to_library(
+            &npub,
+            Some("bitchat"),
+            Some("Bitchat app"),
+            "bitchat.napplet.localhost",
+            vec!["relay".into()],
+            vec!["relay".into()],
+            "naddr1x",
+            2,
+        );
+        let lib = content.library_snapshot();
+        assert_eq!(lib.len(), 2, "one entry swallowed the other");
+        let site = lib.iter().find(|i| i.kind == LibraryKind::Nsite).unwrap();
+        let app = lib.iter().find(|i| i.kind == LibraryKind::Napplet).unwrap();
+        assert!(library_addr(site).is_some(), "the nsite stopped being one");
+        assert_eq!(app.granted, vec!["relay".to_string()]);
+        assert!(site.granted.is_empty());
+
+        // And the other way round.
+        content.add_to_library(&addr, Some("Bitchat site again"), 3);
+        assert_eq!(content.library_snapshot().len(), 2);
+        assert_eq!(
+            content
+                .napplet_grants(&npub, Some("bitchat"))
+                .unwrap()
+                .granted,
+            vec!["relay".to_string()],
+            "re-adding the nsite touched the napplet's grants"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Forgetting the nsite half of a shared `d` tag leaves the napplet half:
+    /// its entry, its grants and its pointer. `remove_from_library` used to
+    /// match on `(author, d)` alone and took both.
+    #[tokio::test]
+    async fn forgetting_the_nsite_keeps_its_napplet_twin() {
+        let dir = tmp("library-forget-twin");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+        let author = nostr::Keys::generate().public_key();
+        let npub = author.to_bech32().unwrap();
+        let addr = SiteAddr {
+            author,
+            d_tag: Some("bitchat".into()),
+        };
+
+        content.add_to_library(&addr, Some("Bitchat site"), 1);
+        content.add_napplet_to_library(
+            &npub,
+            Some("bitchat"),
+            Some("Bitchat app"),
+            "bitchat.napplet.localhost",
+            vec!["relay".into()],
+            vec!["relay".into()],
+            "naddr1x",
+            2,
+        );
+        assert_eq!(content.library_snapshot().len(), 2);
+
+        content.forget_site(&addr);
+
+        let lib = content.library_snapshot();
+        assert_eq!(lib.len(), 1, "forgetting the nsite took the napplet too");
+        let app = &lib[0];
+        assert_eq!(app.kind, LibraryKind::Napplet);
+        assert_eq!(app.granted, vec!["relay".to_string()]);
+        assert_eq!(app.pointer, "naddr1x");
+        assert!(
+            content.napplet_grants(&npub, Some("bitchat")).is_some(),
+            "the napplet's grants went with the nsite"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A napplet-only Library does not make the same-slot nsite "installed":
+    /// `is_in_library` is what decides whether a manifest arriving from a
+    /// peer gets every blob staged and a tile on the grid.
+    #[tokio::test]
+    async fn a_napplet_entry_does_not_make_the_nsite_twin_installed() {
+        let dir = tmp("library-napplet-only");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+        let author = nostr::Keys::generate().public_key();
+        let npub = author.to_bech32().unwrap();
+
+        content.add_napplet_to_library(
+            &npub,
+            Some("bitchat"),
+            Some("Bitchat app"),
+            "bitchat.napplet.localhost",
+            vec!["relay".into()],
+            vec!["relay".into()],
+            "naddr1x",
+            2,
+        );
+        let addr = SiteAddr {
+            author,
+            d_tag: Some("bitchat".into()),
+        };
+        assert!(
+            !content.is_in_library(&addr),
+            "a napplet entry passed for the nsite twin"
+        );
+
+        // And the nsite itself still counts once it is added.
+        content.add_to_library(&addr, Some("Bitchat site"), 3);
+        assert!(content.is_in_library(&addr));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// "Delete cache" keeps installed apps working. A napplet is one manifest
+    /// and one blob; both survive, or the tile survives and the app does not.
+    #[tokio::test]
+    async fn wipe_cache_keeps_an_installed_napplet() {
+        use myco_napplet_runtime::testing::NappletBuilder;
+        let dir = tmp("wipe-napplet");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+
+        let napplet = NappletBuilder::new().d_tag(Some("ding")).build();
+        for (_, bytes) in &napplet.blobs {
+            content.blobs().put(bytes).await.unwrap();
+        }
+        content
+            .relay()
+            .publish(napplet.manifest.clone())
+            .await
+            .unwrap();
+        // Something else to prove the wipe still wipes.
+        content.blobs().put(b"stray bytes").await.unwrap();
+        assert_eq!(content.cache_view().blob_count, 2);
+
+        let npub = napplet.author.to_bech32().unwrap();
+        content.add_napplet_to_library(
+            &npub,
+            Some("ding"),
+            Some("Ding"),
+            "ding.napplet.localhost",
+            vec![],
+            vec![],
+            "naddr1ding",
+            1,
+        );
+        content.wipe_cache(None).await.unwrap();
+
+        assert_eq!(
+            content.cache_view().relay_events,
+            1,
+            "the napplet manifest was wiped"
+        );
+        assert_eq!(
+            content.cache_view().blob_count,
+            1,
+            "the index blob was wiped"
+        );
+        let kept = nsite_deck::seams::newest_in_slot(
+            content.relay().as_ref(),
+            myco_napplet_runtime::KIND_NAMED,
+            &napplet.author,
+            Some("ding"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(kept.map(|e| e.id), Some(napplet.manifest.id));
+        assert_eq!(content.library_snapshot().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The default is the safe one for every entry written before napplets
+    /// existed: they are nsites, and they keep syncing.
+    #[test]
+    fn an_entry_with_no_kind_recorded_is_an_nsite() {
+        let stored = r#"{
+            "authorNpub": "npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr",
+            "dTag": "bitchat", "title": "Bitchat", "urlHost": "x",
+            "pinned": true, "addedAt": 0
+        }"#;
+        let item: LibraryItem = serde_json::from_str(stored).unwrap();
+        assert_eq!(item.kind, LibraryKind::Nsite);
+        assert!(library_addr(&item).is_some());
     }
 }

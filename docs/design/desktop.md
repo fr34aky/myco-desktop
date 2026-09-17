@@ -32,7 +32,17 @@ The desktop runs in one of two modes, selected at startup (`MeshBackend` in
   daemon's TUN, and `CircleGate`'s source-IP checks work unchanged. Outbound
   content rides the daemon's TUN and `.fips` DNS via the system resolver —
   zero code. `StartNode`/`StopNode` become a hint: the mesh lifecycle belongs
-  to systemd.
+  to systemd. Two things the daemon's own defaults get wrong for Myco, both
+  operator settings rather than code: its `fips0` firewall baseline
+  (`/etc/fips/fips.nft`, loaded by `fips-firewall.service`) is default-deny
+  for anything a peer initiates, which is exactly what a pair request, a
+  relay pull and a Blossom fetch are — `desktop/packaging/myco.nft` is the
+  `/etc/fips/fips.d/` drop-in that opens 4870/4873/24243, and without it
+  pairing looks like nothing happening while the daemon's drop counter
+  climbs. And LAN rendezvous (`node.rendezvous.lan.enabled`) is off by
+  default, so a same-Wi-Fi phone never finds the daemon; the phone still
+  dials a *scoped* daemon advert, but a scoped daemon never dials the
+  phone's unscoped one, so leave `scope` unset.
 - **Embedded mode** (fallback for machines without a daemon): a fips node in
   process, as on Android, but with `TunPolicy::SystemTun` (fips creates and
   configures `fips0` itself — requires `CAP_NET_ADMIN`), BLE via fips's own
@@ -129,25 +139,69 @@ verifies `probe.localhost` resolves to loopback and errors clearly if not.
   and failed rows sit in a "File transfers" card on Circle.
 - `myco://` deep links via the desktop-file scheme handler +
   single-instance plugin.
+- Dev tab peer rows show every path fips holds to a peer (lane, state,
+  min RTT, samples, ETX, score; `*` active, `b` backup) and the lane
+  summary `aware [ble]` on line 2 — the phone's multi-path peer view. The
+  desktop crate builds `myco-core` with `fips-multipath`, so BLE is a
+  backup-role path as on Android and `multipath_core` is true.
 
-## Not napplets (yet)
+## Napplets
 
-The Apps grid holds **nsites**: kind 15128/35128 manifests carrying
-`["path", <path>, <sha256>]` tags, rendered as full-page web apps with
-*direct* access to the local relay (`ws://localhost:4870`) and Blossom —
-that is how bitchat does live messaging. **Napplets**
-(github.com/napplet/web) are the sibling kind 35129: iframe-sandboxed apps
-that may not touch relays, storage, or keys directly and reach everything
-through a NIP-5D `postMessage` shell exposing NAP capability domains. Myco
-provides no such shell and does not parse 35129, so napplets are out of
-scope for v1. A post-v1 napplet shell is a natural fit though: the nsite
-window would host the iframe and proxy NAP domains onto the embedded
-relay, Blossom, and the device key.
+The Apps grid holds two kinds of app. **Nsites** (kind 15128/35128) render
+as full-page web apps with *direct* access to the local relay
+(`ws://localhost:4870`) and Blossom. **Napplets** (NIP-5D, kind
+5129/15129/35129; `docs/design/napplet/napplet-runtime.md`) are programs
+Myco *hosts*: a sandboxed iframe inside a trusted shell page, with no
+network of its own, reaching everything through capabilities the core
+implements on its behalf. Fetching, verification, install review, grants,
+every capability and the relaunch-on-grant-change all live in `myco-core`
+and its runtime crate — the desktop, like the phone, is a pipe
+(`desktop/src-tauri/src/napplets.rs`, the `NappletActivity` port).
+
+- **Window.** One chrome-less window per napplet at
+  `http://<label>.napplet.localhost:4880/`, served by the same loopback
+  gateway as nsites but answered by the napplet host, never by the nsite
+  gateway (and no nsite is served at a shell origin). The window is created
+  only after the resolve succeeded — a napplet that fails verification gets
+  no session and no window, and the reason lands on the Apps tab in words.
+  Navigation is pinned to the shell URL (plus the iframe's own
+  `about:srcdoc`): the shell never navigates, the napplet's frame never
+  leaves.
+- **Capability channel.** Android injects `mycoNappletRuntime` with
+  `addWebMessageListener`, scoped to the shell origin. wry has no per-origin
+  injection, and Tauri IPC is deliberately withheld from nsite and napplet
+  windows (they are plain web pages), so the channel is loopback HTTP on
+  the shell's own origin: the gateway prefixes the shell page with a prelude
+  that defines the runtime object over `POST /__myco/napplet/<token>/frame`
+  (one frame in, the replies out — `NappletHost::frame`) and a long poll on
+  `GET …/next` (`next_frames`, 20 s). The token is random, minted per page
+  load, tied to the origin it was minted for, and is the capability: the
+  napplet's iframe has an opaque origin and a `connect-src 'none'` CSP and
+  never sees it. The core's own session id (a counter) never leaves the
+  process. Frames run one at a time until `shell.init` has answered, then
+  overlap, exactly as the Activity's frame loop orders them.
+- **Sessions.** One per page load. The first load adopts the session the
+  open resolved; a `relaunch` frame (a grant changed on the sheet) reloads
+  the page, which opens a fresh session and closes the previous one; closing
+  the window closes its session. The shell page carries
+  `frame-ancestors 'none'` and refuses a `Sec-Fetch-Dest` other than
+  `document`, so it cannot be framed into another origin.
+- **Shell UI.** Napplet tiles sit in the Apps grid with the duck badge and
+  dim when their bytes are not on this device; the context menu adds
+  *Manage permissions* (live switches per domain, in the install sheet's
+  words) and *Reload app*. Install review is an overlay driven by
+  `state.nappletReview`, the only place a grant is written; Discover
+  suggests the same napplets as the phone; Settings › App reach holds the
+  NAP-MESH hop caps. An `naddr` pasted into *Add*, a `myco://share` carrying
+  `napplet`, and the `myco://napplet/<pointer>` launcher link all route to
+  `fetch_napplet` (with the sharer as holder for a share) — never to a
+  silent install.
 
 ## Ports
 
 4870 (relay, mesh + loopback), 24243 (Blossom), the auth port — as on
-Android; 4880 (nsite gateway, loopback only) is desktop-new.
+Android; 4880 (nsite gateway **and** napplet shells + their capability
+channel, loopback only) is desktop-new.
 
 ## Delivery
 

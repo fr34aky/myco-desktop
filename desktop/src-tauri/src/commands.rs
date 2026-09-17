@@ -23,6 +23,24 @@ pub fn open_nsite_window(app: tauri::AppHandle, host: String, title: String) -> 
     crate::nsite_windows::open(&app, &host, &title)
 }
 
+/// Open (or re-focus) the window for one installed napplet. Async so the
+/// resolve — a relay and a blob read — rides a worker, not the UI thread;
+/// a napplet that fails verification gets no window and the error comes back
+/// in words (the phone's toast).
+#[tauri::command]
+pub async fn open_napplet_window(
+    app: tauri::AppHandle,
+    host: String,
+    pointer: String,
+    title: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::napplets::Napplets::open_window(&app, &host, &pointer, &title)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// The "My code" payload: the current `myco://pair` URI and its QR as SVG.
 #[tauri::command]
 pub fn pair_payload(
@@ -169,14 +187,22 @@ pub fn backend_info(choice: State<'_, crate::backend::Choice>) -> serde_json::Va
     choice.info()
 }
 
-/// The share payload for one installed nsite: a `myco://share` URI (pair
-/// payload + the nsite, presenter auto-accepts) and its QR as SVG.
+/// The share payload for one installed app: a `myco://share` URI (pair
+/// payload + the app, presenter auto-accepts) and its QR as SVG. `host` names
+/// an nsite; `napplet` its `naddr` pointer instead — one of the two, a share
+/// is one app.
 #[tauri::command]
 pub fn share_payload(
     core: State<'_, Core>,
     pairing: State<'_, crate::pairing::Pairing>,
-    host: String,
+    host: Option<String>,
+    napplet: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    let app = match (host, napplet) {
+        (_, Some(pointer)) if !pointer.is_empty() => crate::pairing::SharedApp::Napplet(pointer),
+        (Some(host), _) if !host.is_empty() => crate::pairing::SharedApp::Nsite(host),
+        _ => return Err("nothing to share".to_string()),
+    };
     let npub = {
         let mut runtime = core.0.lock().unwrap();
         let state: serde_json::Value =
@@ -190,7 +216,7 @@ pub fn share_payload(
         return Err("no identity yet (degraded mode?)".to_string());
     }
     let name = pairing.device_name(&npub);
-    let uri = pairing.share_uri(&npub, &name, &host);
+    let uri = pairing.share_uri(&npub, &name, &app);
     let svg = qrcode::QrCode::new(uri.as_bytes())
         .map_err(|e| e.to_string())?
         .render()
@@ -201,25 +227,30 @@ pub fn share_payload(
     Ok(serde_json::json!({ "uri": uri, "svg": svg }))
 }
 
-/// Put one nsite in the desktop launcher: a `.desktop` entry whose Exec is
-/// this binary with the app's `myco://app` link — the single-instance plugin
+/// Put one app in the desktop launcher: a `.desktop` entry whose Exec is
+/// this binary with the app's link — `myco://app/<host>` for an nsite,
+/// `myco://napplet/<pointer>` for a napplet — the single-instance plugin
 /// forwards it into the running shell, a cold start opens the app directly.
 #[tauri::command]
-pub fn add_launcher_shortcut(host: String, title: String) -> Result<String, String> {
+pub fn add_launcher_shortcut(link: String, title: String) -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let slug: String = host
+    let target = link
+        .strip_prefix("myco://")
+        .filter(|rest| rest.starts_with("app/") || rest.starts_with("napplet/"))
+        .ok_or_else(|| format!("not an app link: {link}"))?;
+    let slug: String = target
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
     let dir = dirs::data_dir().ok_or("no data dir")?.join("applications");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join(format!("myco-nsite-{slug}.desktop"));
+    let path = dir.join(format!("myco-{slug}.desktop"));
     let entry = format!(
         "[Desktop Entry]\nType=Application\nName={}\nComment=Myco app\n\
-         Exec={} myco://app/{}\nTerminal=false\nCategories=Network;\n",
+         Exec={} {}\nTerminal=false\nCategories=Network;\n",
         title.replace('\n', " "),
         exe.display(),
-        host
+        link
     );
     std::fs::write(&path, entry).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().into_owned())
