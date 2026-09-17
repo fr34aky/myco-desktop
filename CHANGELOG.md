@@ -11,6 +11,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Desktop: napplets. The Apps grid now holds napplets beside nsites, exactly
+  as on the phone — add one by pasting its `naddr` into *Add*, from a
+  `myco://share` link a phone shows you, or from Discover's suggestions
+  (Mappy, Minesweeper, DingDong; DingDong comes preinstalled). Install
+  review lists what the app will be able to do before anything is granted;
+  right-click a napplet for *Manage permissions* and *Reload app*. Each
+  napplet opens in its own window, sandboxed, with no network of its own —
+  everything it does goes through Myco. Settings › App reach caps how far
+  apps may send and look over the mesh.
+- Desktop: the Dev tab shows every path to a peer (lane, state, RTT,
+  samples, ETX, score), with the active lane and the standbys on the peer's
+  row, now that the mesh core keeps several links to one peer.
+- Desktop: the relay store moved to LMDB with this release; an existing
+  `events.json` is migrated on first launch and kept as `events.json.migrated`.
 - Desktop (embedded mode): a phone on the same Wi-Fi is found over mDNS and
   dialled over UDP, so transfers and sync stop waiting on Bluetooth when a
   LAN is available.

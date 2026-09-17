@@ -37,8 +37,10 @@ the same core:
 | ![Discover](docs/images-desktop/discover.png) | **Discover** — a suggested set of public nsites, plus whatever the peers in your circle are carrying right now. |
 | ![Settings](docs/images-desktop/settings.png) | **Settings** — which mesh backend is running (system daemon or embedded node), storage usage and wipes, an offline-only switch, and your device identity. |
 
-- **Apps** — every installed nsite as a tile; each opens chrome-less in its own
-  window, served from a loopback gateway exactly as on the phone.
+- **Apps** — every installed nsite and napplet as a tile; each opens chrome-less
+  in its own window — nsites served from a loopback gateway exactly as on the
+  phone, napplets sandboxed inside the same trusted shell page the phone uses,
+  with install review and per-capability permissions.
 - **Dev** — peer diagnostics (transports, RTT, lanes) and a speed test.
 
 ## Mesh backends

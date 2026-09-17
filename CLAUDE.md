@@ -134,10 +134,16 @@ cannot work is refused with a dialog. Full rationale: `docs/design/desktop.md`.
   not decorative**: the reducer's `poll_pending_start` rides this cadence, and it also
   hosts pair auto-accept and the received-file publish.
 - `gateway_http.rs` — loopback HTTP on the **fixed** `127.0.0.1:4880`, routing on the
-  `Host` header: `http://<host>.localhost:4880/<path>` → `Content::gateway_get_page`.
+  `Host` header: `http://<host>.localhost:4880/<path>` → `Content::gateway_get_page`;
+  `*.napplet.localhost` hosts go to `napplets.rs` instead, never to the nsite gateway.
   Fixed port and `<host>.localhost` because that origin is the nsites' `localStorage`
   identity (byte-faithful to Android).
 - `nsite_windows.rs` — one chrome-less webview window per nsite.
+- `napplets.rs` — the `NappletActivity` port: one window per napplet at
+  `http://<label>.napplet.localhost:4880/`, the shell page served by the gateway with
+  a prelude that defines `mycoNappletRuntime` over loopback HTTP (`/__myco/napplet/
+  <token>/frame` + a `/next` long poll). The random token is the capability; Tauri
+  IPC is never granted to nsite or napplet windows. See `docs/design/desktop.md`.
 - `pairing.rs` / `deeplinks.rs` — QR display + paste (no camera), the single-use 30-min
   pair-secret ledger, 30-day pending deep links, and the `myco://pair|share|app` codecs.
 - `lanshare/` — the Android hotspot share minus the AP: mesh-only bind (default) or

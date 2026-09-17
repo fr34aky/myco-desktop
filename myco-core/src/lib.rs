@@ -103,6 +103,10 @@ mod tun_bridge_jni;
 pub use action::NativeAppAction;
 pub use content::Content;
 pub use control_client::SYSTEM_SOCKET_PATH;
+// The desktop shell hosts napplets the way `jni_abi` does — it holds the host
+// and opens sessions with the runtime lock released — so the two types it
+// names are exported beside the runtime itself.
+pub use napplet::{NappletHost, OpenedNapplet};
 pub use nsite_deck::GatewayResponse;
 pub use runtime::{AppRuntime, MeshBackend, RuntimeConfig, TunPolicy};
 pub use state::{AppState, IdentityView, NodeStatus};

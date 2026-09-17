@@ -13,6 +13,9 @@
 
   <div id="menu" class="hidden"></div>
   <div id="modal-overlay" class="hidden"><div id="modal"></div></div>
+  <!-- Install review for a napplet: driven by state.nappletReview, not by a
+       click, so a fetch that finishes while another tab is up still asks. -->
+  <div id="review-overlay" class="hidden"><div id="review"></div></div>
 
   <nav id="tabs">
     <button data-tab="apps" class="active">Apps</button>

@@ -136,8 +136,12 @@ function render(force = false) {
     screen.innerHTML = '<div class="empty">Starting…</div>';
     return;
   }
+  renderReview();
   const spec = {
-    apps: { slice: () => [state.sites, state.updateCheck], render: renderApps },
+    apps: {
+      slice: () => [state.sites, state.updateCheck, state.library, state.nappletStatus],
+      render: renderApps,
+    },
     circle: {
       slice: () => [state.circle, state.reachableNpubs, state.blePeers,
                     state.outboundPairs, state.pendingPairRequests, state.fileTransfers,
@@ -149,7 +153,8 @@ function render(force = false) {
       render: renderDiscover,
     },
     settings: {
-      slice: () => [state.identity, state.node, state.appVersion, state.cache, state.offlineOnly],
+      slice: () => [state.identity, state.node, state.appVersion, state.cache, state.offlineOnly,
+                    state.nappletMeshReach],
       render: renderSettings,
     },
     dev: {
@@ -164,10 +169,35 @@ function render(force = false) {
   screen.innerHTML = spec.render();
 }
 
+// nsites and napplets share one grid — they arrive the same way and open the
+// same way from here; what differs is the badge and the menu behind it.
+function installedNapplets() {
+  return (state.library || []).filter((i) => i.kind === "napplet" && i.pinned);
+}
+
+function nappletTile(item) {
+  const title = item.title || item.dTag || "napplet";
+  const letter = (title || "N").slice(0, 1).toUpperCase();
+  // Dimmed like an nsite that is not downloaded: the app is in the Library
+  // but its bytes are not on this device (after "Delete cache", say).
+  const status = (state.nappletStatus || []).find((s) => s.host === item.urlHost);
+  const missing = status && status.state === "missing";
+  return `<div class="tile ${missing ? "dim" : ""}" data-pointer="${esc(item.pointer)}"
+              data-shell="${esc(item.urlHost)}" data-title="${esc(title)}" title="${esc(item.dTag || item.pointer)}">
+    <div class="glyph"><span>${esc(letter)}</span><span class="badge" title="napplet">🦆</span></div>
+    <div class="title">${esc(title)}</div>
+    ${missing ? `<div class="sub bad">not on this device</div>` : ""}
+  </div>`;
+}
+
 function renderApps() {
   const sites = (state.sites || [])
     .slice()
     .sort((a, b) => (a.title || a.host).localeCompare(b.title || b.host));
+  const napplets = installedNapplets()
+    .sort((a, b) => (a.title || a.dTag || "").localeCompare(b.title || b.dTag || ""))
+    .map(nappletTile)
+    .join("");
   const tiles = sites
     .map((s) => {
       const title = s.title || s.host;
@@ -194,7 +224,115 @@ function renderApps() {
     })
     .join("");
   const add = `<div class="tile add" id="add-app"><div class="glyph">+</div><div class="title">Add</div></div>`;
-  return `<h1>Apps</h1><div class="grid">${tiles}${add}</div>`;
+  return `<h1>Apps</h1><div class="grid">${tiles}${napplets}${add}</div>`;
+}
+
+// ---- napplets: install review and permissions (the phone's Apps-tab sheets)
+
+// A NAP domain in words a person can act on. Unknown domains are shown
+// verbatim rather than hidden: a napplet asking for something this build has
+// never heard of is exactly what the user should see.
+function capabilityWording(domain) {
+  return {
+    relay: ["Relays", "Read and post as you on your relays, without asking each time"],
+    outbox: ["Outbox", "Post as you to your relays and to other people's, and read from theirs"],
+    mesh: ["Mesh", "Send and receive data within your Circle, without the internet"],
+    identity: ["Identity", "See your name and profile"],
+    resource: ["Pictures & files", "Load pictures and files by their content hash"],
+    storage: ["Storage", "Save things on this device"],
+    intent: ["Other apps", "Open your other apps"],
+    inc: ["App to app", "Talk to your other open apps"],
+    notify: ["Notifications", "Send you notifications"],
+    theme: ["Theme", "Match your colours"],
+    link: ["Links", "Open links outside Myco"],
+    config: ["Settings", "Have settings you can change"],
+    shell: ["Start up", "Every app does this"],
+  }[domain] || [domain, "Something this version of Myco doesn't know about"];
+}
+
+function capabilityRow(domain, { checkbox = false, on = true } = {}) {
+  const [title, detail] = capabilityWording(domain);
+  return `<label class="cap ${on ? "" : "off"}">
+    ${checkbox ? `<input type="checkbox" data-grant="${esc(domain)}" ${on ? "checked" : ""} />` : ""}
+    <span><div class="cap-title">${esc(title)}</div><div class="cap-detail">${esc(detail)}</div></span>
+  </label>`;
+}
+
+// The install-review sheet: what a napplet is asking for, before it has it.
+// This is the only place a grant is written — fetching stores bytes and
+// grants nothing. Driven by state.nappletReview, so a fetch that finishes
+// while another tab is up still asks, and a dismissed sheet stays dismissed.
+let lastReviewKey = "";
+function renderReview() {
+  const overlay = document.getElementById("review-overlay");
+  const review = state && state.nappletReview;
+  const key = review ? JSON.stringify(review) : "";
+  if (key === lastReviewKey) return;
+  lastReviewKey = key;
+  if (!review) {
+    overlay.classList.add("hidden");
+    return;
+  }
+  const box = document.getElementById("review");
+  let body;
+  if (review.loading) {
+    body = `<h3>Fetching app…</h3>
+      <div class="desc">Looking for it on ${review.holder ? "the sharer's device and " : ""}the relays.</div>
+      <div class="modal-actions"><button id="review-dismiss" class="ghost">Cancel</button></div>`;
+  } else if (review.error) {
+    body = `<h3>Couldn't fetch this app</h3>
+      <div class="desc">${esc(review.error)}</div>
+      <div class="modal-actions">
+        <button id="review-dismiss" class="ghost">Close</button>
+        <button id="review-retry">Try again</button>
+      </div>`;
+  } else {
+    const grants = (review.grants || []).map((d) => capabilityRow(d)).join("");
+    body = `<h3>${esc(review.title) || "Untitled app"} <span class="sub">🦆 napplet</span></h3>
+      ${review.description ? `<div class="desc">${esc(review.description)}</div>` : ""}
+      <div class="sub" style="margin:.6rem 0 .2rem">This app will be able to:</div>
+      ${grants || '<div class="sub">Nothing beyond starting up.</div>'}
+      <div class="sub" style="margin-top:.6rem">You can switch any of these off later from the app's menu.</div>
+      <div class="modal-actions">
+        <button id="review-dismiss" class="ghost">Not now</button>
+        <button id="review-install">Add to my apps</button>
+      </div>`;
+  }
+  box.innerHTML = body;
+  overlay.classList.remove("hidden");
+  const dismiss = document.getElementById("review-dismiss");
+  if (dismiss) dismiss.onclick = () => dispatch({ type: "dismiss_napplet_review" });
+  const retry = document.getElementById("review-retry");
+  if (retry) {
+    retry.onclick = () =>
+      dispatch({ type: "fetch_napplet", pointer: review.pointer, holder: review.holder || undefined });
+  }
+  const install = document.getElementById("review-install");
+  if (install) {
+    install.onclick = () =>
+      dispatch({ type: "install_napplet", pointer: review.pointer, granted: review.grants || [] });
+  }
+}
+
+// What a napplet may do, in the same words the install sheet used, with a
+// switch for each. A change is live: an open window restarts under it.
+function managePermissions(pointer, title) {
+  const item = installedNapplets().find((i) => i.pointer === pointer);
+  if (!item) return;
+  const granted = new Set(item.granted || []);
+  const rows = (state.nappletDomains || [])
+    .map((d) => capabilityRow(d, { checkbox: true, on: granted.has(d) }))
+    .join("");
+  ask(`${title} may:`, { html: `<div data-permissions="${esc(pointer)}">${rows}</div>`, yes: "Done", no: null });
+}
+
+function openNapplet(item) {
+  const title = item.title || item.dTag || "napplet";
+  invoke("open_napplet_window", { host: item.urlHost, pointer: item.pointer, title }).catch((e) =>
+    // Said out loud: a window that never appears reads as a click that did
+    // not register, and hides that the app is gone.
+    askInfo(`Couldn't open this app: ${e || "it isn't on this device"}`)
+  );
 }
 
 function shortNpub(npub) {
@@ -391,13 +529,46 @@ function renderLanshare() {
   </div>`;
 }
 
-// The trio the phone also suggests — public nsites that pull from the Circle
+// The set the phone also suggests — public nsites that pull from the Circle
 // if a peer holds them, else the public fallback.
 const SUGGESTED_APPS = [
   { title: "bitchat", host: "4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivbitchat" },
   { title: "ICS", host: "4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivics" },
   { title: "Dumplings", host: "4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivdumplings" },
 ];
+
+// Napplet suggestions, keyed as the Library keys them (author + d-tag) so an
+// installed one is recognised whatever pointer spelling it was added under.
+// The pointer is an naddr, not `<npub>:<d>`: its relay hints ride inside it
+// and are where the fetch looks first. Same list as the phone's Discover.
+const SUGGESTED_NAPPLETS = [
+  {
+    title: "Mappy",
+    pointer: "naddr1qqyx6ctswpkx2arnqgsqhtasevhkqty908ymemjgwuphelgrv33gf62p64ywy5ldum0as5srqsqqpzfe5a247a",
+    authorNpub: "npub1pwhmpje0vqkg27wfhnhysacr0n7sxerzsn55r42guff7meklmpfqka6r38",
+    dTag: "mapplets",
+  },
+  {
+    title: "Minesweeper",
+    pointer: "naddr1qq9k66twv4ehwet9wpjhyqg4waehxw309aex2mrp0yhxg6t5w3hjuur4vgpzqfngzhsvjggdlgeycm96x4emzjlwf8dyyzdfg4hefp89zpkdgz99qvzqqqyf8yzehfvw",
+    authorNpub: "npub1ye5ptcxfyyxl5vjvdjar2ua3f0hynkjzpx552mu5snj3qmx5pzjscpknpr",
+    dTag: "minesweeper",
+  },
+  {
+    title: "DingDong",
+    pointer: "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9hxwer0denstp6v0k",
+    authorNpub: "npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr",
+    dTag: "dingdong",
+  },
+];
+
+function suggestedNappletTile(s) {
+  const letter = s.title.slice(0, 1).toUpperCase();
+  return `<div class="tile" data-fetch="${esc(s.pointer)}" data-title="${esc(s.title)}" title="${esc(s.dTag)}">
+    <div class="glyph"><span>${esc(letter)}</span><span class="badge" title="napplet">🦆</span></div>
+    <div class="title">${esc(s.title)}</div>
+  </div>`;
+}
 
 function discoverTile(host, title, sub, holder) {
   const letter = (title || "?").slice(0, 1).toUpperCase();
@@ -413,7 +584,15 @@ function discoverTile(host, title, sub, holder) {
 }
 
 function renderDiscover() {
-  const suggested = SUGGESTED_APPS.map((s) => discoverTile(s.host, s.title, "", null)).join("");
+  // A napplet already in the Library is on the Apps tab; it is not news here.
+  // Nsite suggestions stay listed when installed (unchanged).
+  const installed = installedNapplets();
+  const napplets = SUGGESTED_NAPPLETS.filter(
+    (s) => !installed.some((i) => i.authorNpub === s.authorNpub && i.dTag === s.dTag)
+  )
+    .map(suggestedNappletTile)
+    .join("");
+  const suggested = SUGGESTED_APPS.map((s) => discoverTile(s.host, s.title, "", null)).join("") + napplets;
 
   // Not news: a suggested app (offered above) or one already pinned — that
   // lives on the Apps tab. Same filter the phone applies.
@@ -455,6 +634,7 @@ function renderSettings() {
   const used = cache.usedBytes || 0;
   const pct = Math.min(100, (used / STORAGE_CAP) * 100);
   const daemonMode = (node.statusText || "").includes("daemon");
+  const reach = state.nappletMeshReach || { publishTtl: 0, publishMax: 0, subscribeTtl: 0, subscribeMax: 0 };
   return `<h1>Settings</h1>
     <div class="card">
       <h2>Mesh</h2>
@@ -475,6 +655,14 @@ function renderSettings() {
         <input type="checkbox" id="offline-only" ${state.offlineOnly ? "checked" : ""} />
         Mesh only — never use public internet relays as a fallback
       </label>
+    </div>
+    <div class="card">
+      <h2>App reach</h2>
+      <div class="sub">How far apps (napplets granted Mesh) may reach over the mesh. Two numbers
+        because a flooded read costs every hop an answer as well as a forward, so it defaults lower.
+        Zero keeps an app's traffic on this device.</div>
+      ${hopsRow("Sending", "How far apps may send over the mesh", "pub", reach.publishTtl, reach.publishMax)}
+      ${hopsRow("Fetching", "How far apps may look for what they missed", "sub", reach.subscribeTtl, reach.subscribeMax)}
     </div>
     <div class="card">
       <h2>Storage</h2>
@@ -504,6 +692,21 @@ function renderSettings() {
     </div>`;
 }
 
+// A hop-count stepper: − / value / +, clamped to 0..max. The value is
+// worded, because "2" says nothing to someone who has never heard of a hop.
+function hopsRow(title, subtitle, which, hops, max) {
+  const wording =
+    hops === 0 ? "This device only" : hops === 1 ? "Devices next to you (1 hop)" : `${hops} hops out`;
+  return `<div class="row" style="margin-top:.6rem">
+    <span class="grow"><div>${esc(title)}</div><div class="sub">${esc(subtitle)} — ${esc(wording)}</div></span>
+    <span class="stepper">
+      <button class="ghost" data-act="reach" data-which="${which}" data-delta="-1" ${hops <= 0 ? "disabled" : ""}>−</button>
+      <span class="n">${hops}</span>
+      <button class="ghost" data-act="reach" data-which="${which}" data-delta="1" ${hops >= max ? "disabled" : ""}>+</button>
+    </span>
+  </div>`;
+}
+
 // ------------------------------------------------------------------ dev tab
 
 const openPeers = new Set();
@@ -522,6 +725,43 @@ function agoText(ms) {
   if (s < 10) return "now";
   if (s < 120) return `${s}s ago`;
   return `${Math.round(s / 60)}m ago`;
+}
+
+// The lanes a peer has a non-dead path on, in the fixed order Bluetooth,
+// Aware, Network, each with whether fips currently sends on it. The Aware
+// pool can hold several paths to one peer — that is one lane, lit if any of
+// them is active. A core without paths shows the single transport as before.
+const LANE_ORDER = ["ble", "aware", "udp"];
+function peerLanes(p) {
+  const live = (p.paths || []).filter((x) => x.state !== "dead" && x.lane);
+  if (!live.length) return p.transport ? [[p.transport, true]] : [];
+  const byLane = new Map();
+  for (const x of live) byLane.set(x.lane, (byLane.get(x.lane) || false) || x.active);
+  const rank = (l) => (LANE_ORDER.indexOf(l) < 0 ? LANE_ORDER.length : LANE_ORDER.indexOf(l));
+  return [...byLane.entries()].sort((a, b) => rank(a[0]) - rank(b[0]));
+}
+
+// Line 2 of a peer row: the active lane first, standbys in brackets —
+// `aware [ble]`. Nothing at all is an em-dash.
+function pathSummary(p) {
+  const lanes = peerLanes(p);
+  if (!lanes.length) return "—";
+  const active = lanes.filter((l) => l[1]).map((l) => l[0]).join(" ") || "—";
+  const standby = lanes.filter((l) => !l[1]).map((l) => l[0]);
+  return standby.length ? `${active} [${standby.join(" ")}]` : active;
+}
+
+// One path, fixed-width: lane, lifecycle state, then min RTT, sample count,
+// ETX and score. `*` marks the path fips sends on, `b` a backup-role
+// transport. Unmeasured values are dashes, never zeros. `min` is the window
+// minimum, not srtt — a loaded active path shows a high ping elsewhere and a
+// low min here, and that is why it has not switched.
+function pathRow(x) {
+  const mark = x.active ? "*" : x.role === "backup" ? "b" : " ";
+  const min = x.minRttMs != null ? `${x.minRttMs}ms` : "—";
+  const score = x.score != null ? x.score.toFixed(2) : "—";
+  const line = `${mark} ${(x.lane || "").padEnd(5)} ${(x.state || "").padEnd(7)} min ${min} n=${x.rttSamples ?? 0} etx ${(x.etx ?? 0).toFixed(2)} score ${score}`;
+  return `<div class="mono sub ${x.active ? "active" : ""}">${esc(line)}</div>`;
 }
 
 function renderDev() {
@@ -563,7 +803,7 @@ function renderDev() {
         <summary class="row">
           <span class="dot ${PEER_DOT[p.state] || "idle"}"></span>
           <span class="grow">${esc(label)}
-            <span class="sub">${esc(p.transport || "")} · ${esc(p.state)} · ${agoText(p.lastSeenMs)}</span></span>
+            <span class="sub">${esc(pathSummary(p))} · ${esc(p.state)} · ${agoText(p.lastSeenMs)}</span></span>
           ${p.state === "connected" && p.npub
             ? `<button data-act="speedtest" data-npub="${esc(p.npub)}">Speedtest</button>`
             : ""}
@@ -577,6 +817,9 @@ function renderDev() {
             <span class="k">rssi / psm</span><span class="v">${p.rssi ?? "—"} / ${p.psm || "—"}</span>
             <span class="k">send drops</span><span class="v">${p.sendDrops ?? 0}</span>
           </div>
+          ${(p.paths || []).length
+            ? `<div class="paths"><div class="sub">paths</div>${p.paths.map(pathRow).join("")}</div>`
+            : ""}
           ${attempts ? `<div style="margin-top:.4rem">${attempts}</div>` : ""}
         </div>
       </details>`;
@@ -614,6 +857,61 @@ function openApp(host, title) {
 // The context menu lives outside #screen so re-renders can't wipe it.
 const menu = document.getElementById("menu");
 
+function shareApp(payload, title) {
+  invoke("share_payload", payload)
+    .then((p) =>
+      ask(`Scan with Myco on another device to pair with you and open ${title} — or send the link.`, {
+        html: `<div class="qr">${p.svg}</div>
+               <input type="text" readonly value="${esc(p.uri)}" onfocus="this.select()" />`,
+        yes: "Done",
+        no: null,
+      })
+    )
+    .catch((e) => askInfo(`Sharing failed: ${e}`));
+}
+
+function addToLauncher(link, title) {
+  invoke("add_launcher_shortcut", { link, title })
+    .then((path) => askInfo(`${title} is in your launcher now (${path}).`))
+    .catch((e) => askInfo(`Failed to add the shortcut: ${e}`));
+}
+
+// The long-press sheet for a napplet — the same pull-up an nsite gets, because
+// from the grid they are both just apps. What differs: no sync, and something
+// an nsite never has — capabilities someone agreed to, which they should be
+// able to see and take back.
+function showNappletMenu(x, y, pointer, title) {
+  menu.innerHTML = `
+    <button data-act="open">Open</button>
+    <button data-act="share">Share&#8230;</button>
+    <button data-act="permissions">Manage permissions</button>
+    <button data-act="launcher">Add to launcher</button>
+    <button data-act="update">Check for updates</button>
+    <button data-act="reload">Reload app</button>
+    <button data-act="remove" class="danger">Remove app</button>`;
+  menu.style.left = Math.min(x, window.innerWidth - 200) + "px";
+  menu.style.top = Math.min(y, window.innerHeight - 280) + "px";
+  menu.classList.remove("hidden");
+  menu.onclick = (e) => {
+    const act = e.target.closest("button")?.dataset.act;
+    menu.classList.add("hidden");
+    const item = installedNapplets().find((i) => i.pointer === pointer);
+    if (act === "open" && item) openNapplet(item);
+    if (act === "share") shareApp({ napplet: pointer }, title);
+    if (act === "permissions") managePermissions(pointer, title);
+    if (act === "launcher") addToLauncher(`myco://napplet/${pointer}`, title);
+    if (act === "update") dispatch({ type: "check_nsite_updates" });
+    // Fetches the app again and shows the same screen it was added with —
+    // the way to revisit what it is allowed to do, or to force a re-fetch.
+    if (act === "reload") dispatch({ type: "fetch_napplet", pointer });
+    if (act === "remove") {
+      askConfirm(`Remove ${title}? Its permissions are dropped; its files stay cached until the cache is cleared.`, "Remove").then((ok) => {
+        if (ok) dispatch({ type: "forget_napplet", pointer });
+      });
+    }
+  };
+}
+
 function showMenu(x, y, host, title) {
   menu.innerHTML = `
     <button data-act="open">Open</button>
@@ -628,23 +926,8 @@ function showMenu(x, y, host, title) {
     const act = e.target.closest("button")?.dataset.act;
     menu.classList.add("hidden");
     if (act === "open") openApp(host, title);
-    if (act === "share") {
-      invoke("share_payload", { host })
-        .then((p) =>
-          ask(`Scan with Myco on another device to pair with you and open ${title} — or send the link.`, {
-            html: `<div class="qr">${p.svg}</div>
-                   <input type="text" readonly value="${esc(p.uri)}" onfocus="this.select()" />`,
-            yes: "Done",
-            no: null,
-          })
-        )
-        .catch((e) => askInfo(`Sharing failed: ${e}`));
-    }
-    if (act === "launcher") {
-      invoke("add_launcher_shortcut", { host, title })
-        .then((path) => askInfo(`${title} is in your launcher now (${path}).`))
-        .catch((e) => askInfo(`Failed to add the shortcut: ${e}`));
-    }
+    if (act === "share") shareApp({ host }, title);
+    if (act === "launcher") addToLauncher(`myco://app/${host}`, title);
     if (act === "update") dispatch({ type: "check_nsite_updates" });
     if (act === "remove") {
       askConfirm(`Remove ${title}? Its files stay cached until the cache is cleared.`, "Remove").then((ok) => {
@@ -662,8 +945,14 @@ document.addEventListener("click", (e) => {
 
 document.getElementById("screen").addEventListener("click", (e) => {
   if (e.target.closest("#add-app")) {
-    askPrompt("Paste an nsite link or host:").then((link) => {
-      if (link && link.trim()) dispatch({ type: "open_nsite", link: link.trim() });
+    askPrompt("Paste an nsite link or host, or a napplet's naddr:").then((link) => {
+      const text = (link || "").trim();
+      if (!text) return;
+      // An naddr is the honest signal for a napplet: Rust refuses one that
+      // is not a napplet kind. It is fetched and reviewed, never installed
+      // by a paste.
+      if (/^naddr1/i.test(text)) dispatch({ type: "fetch_napplet", pointer: text });
+      else dispatch({ type: "open_nsite", link: text });
     });
     return;
   }
@@ -709,6 +998,15 @@ document.getElementById("screen").addEventListener("click", (e) => {
       });
     }
     if (kind === "speedtest") dispatch({ type: "speedtest_peer", npub });
+    if (kind === "reach") {
+      const reach = state.nappletMeshReach || {};
+      const delta = Number(act.dataset.delta);
+      let pub = reach.publishTtl || 0;
+      let sub = reach.subscribeTtl || 0;
+      if (act.dataset.which === "pub") pub = Math.max(0, Math.min(reach.publishMax ?? 255, pub + delta));
+      else sub = Math.max(0, Math.min(reach.subscribeMax ?? 255, sub + delta));
+      dispatch({ type: "set_napplet_mesh_reach", publishTtl: pub, subscribeTtl: sub });
+    }
     if (kind === "send-file") {
       invoke("share_file_with_peer", { npub })
         .then((json) => {
@@ -745,6 +1043,20 @@ document.getElementById("screen").addEventListener("click", (e) => {
     }
     return;
   }
+  const napplet = e.target.closest(".tile[data-pointer]");
+  if (napplet) {
+    const item = installedNapplets().find((i) => i.pointer === napplet.dataset.pointer);
+    if (item) openNapplet(item);
+    return;
+  }
+  const suggestion = e.target.closest(".tile[data-fetch]");
+  if (suggestion) {
+    // The tap fetches and asks; the install action belongs to the review
+    // sheet alone, so a suggestion can never grant a capability by itself.
+    dispatch({ type: "fetch_napplet", pointer: suggestion.dataset.fetch });
+    activateTab("apps");
+    return;
+  }
   const tile = e.target.closest(".tile[data-host]");
   if (tile) {
     const { host, title, holder } = tile.dataset;
@@ -779,10 +1091,31 @@ document.getElementById("screen").addEventListener("change", (e) => {
 });
 
 document.getElementById("screen").addEventListener("contextmenu", (e) => {
+  const napplet = e.target.closest(".tile[data-pointer]");
+  if (napplet) {
+    e.preventDefault();
+    showNappletMenu(e.clientX, e.clientY, napplet.dataset.pointer, napplet.dataset.title);
+    return;
+  }
   const tile = e.target.closest(".tile[data-host]");
   if (!tile) return;
   e.preventDefault();
   showMenu(e.clientX, e.clientY, tile.dataset.host, tile.dataset.title);
+});
+
+// A permission switch on a napplet's sheet: live, and the only writer of a
+// grant besides install review.
+document.getElementById("modal").addEventListener("change", (e) => {
+  const box = e.target.closest("input[data-grant]");
+  const sheet = e.target.closest("[data-permissions]");
+  if (!box || !sheet) return;
+  box.closest(".cap")?.classList.toggle("off", !box.checked);
+  dispatch({
+    type: "set_napplet_grant",
+    pointer: sheet.dataset.permissions,
+    domain: box.dataset.grant,
+    allowed: box.checked,
+  });
 });
 
 document.getElementById("tabs").addEventListener("click", (e) => {
