@@ -9,6 +9,13 @@ pub struct AppState {
     pub rev: u64,
     pub error: String,
     pub app_version: String,
+    /// Whether this core was built against a fips with multi-path
+    /// switchover (`fips-multipath` feature). On a single-path core a second
+    /// transport to a live peer means a second handshake that displaces the
+    /// session; on a multi-path core it means a standby path. The radios
+    /// read this to decide whether dialling a peer another lane already
+    /// carries is a standby worth having or churn to avoid.
+    pub multipath_core: bool,
     pub identity: IdentityView,
     pub node: NodeStatus,
     /// BLE adapter/transport status (the developer-UI control plane).
@@ -29,6 +36,23 @@ pub struct AppState {
     pub sites: Vec<crate::content::SiteStatusView>,
     /// Pinned/opened sites.
     pub library: Vec<crate::content::LibraryItem>,
+    /// A napplet that has been fetched and verified but **not installed**,
+    /// waiting on the install-review screen.
+    ///
+    /// Present only between a fetch and the user's answer. It is what makes
+    /// review unskippable: fetching stores bytes and grants nothing, and the
+    /// only thing that writes a grant is the user answering this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub napplet_review: Option<crate::napplet::NappletReview>,
+    /// Whether each installed napplet can open right now — the tile's dim
+    /// state. Keyed by the Library entry's `urlHost`.
+    pub napplet_status: Vec<crate::content::NappletStatusView>,
+    /// The user's cap on how far napplets reach over the mesh (NAP-MESH).
+    pub napplet_mesh_reach: NappletMeshReachView,
+    /// Every capability domain this build can grant a napplet, in the order
+    /// the sheet lists them. The handshake is not among them: it is not a
+    /// grant.
+    pub napplet_domains: Vec<String>,
     /// Local relay/Blossom counts (for the developer screen + cache view).
     pub cache: crate::content::CacheView,
     /// The user's **Circle**: paired peers we pull nsites from over the mesh.
@@ -103,8 +127,12 @@ pub struct PeerDiagnosticView {
     /// `udp`, `tcp`); empty when not connected.
     pub transport: String,
     /// Other transports this peer is also reachable over, in the fixed order
-    /// `ble`, `aware`, `udp`, `tcp`. Empty until Phase 2 populates it.
+    /// `ble`, `aware`, `udp`, `tcp`: the lanes of every non-dead path in
+    /// [`paths`](Self::paths) other than the active one.
     pub also_reachable_via: Vec<String>,
+    /// Every path fips holds to this peer, in fips's own order. Empty when
+    /// the row has no peer view or the daemon predates multi-path.
+    pub paths: Vec<PeerPathView>,
     /// Milliseconds-since-epoch this row was last heard from; `0` when never
     /// heard from (renders as an em-dash, never "0s").
     pub last_seen_ms: u64,
@@ -153,6 +181,47 @@ pub struct PeerDiagnosticView {
     /// Recorded connect attempts against this peer, newest first, capped at 20.
     /// Empty when nothing has been recorded.
     pub attempts: Vec<PeerAttemptView>,
+}
+
+/// The NAP-MESH caps as the Settings screen shows them: the current values and
+/// the most each may be set to.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NappletMeshReachView {
+    pub publish_ttl: u8,
+    pub publish_max: u8,
+    pub subscribe_ttl: u8,
+    pub subscribe_max: u8,
+}
+
+/// One transport path to a peer, as fips's multi-path layer tracks it.
+///
+/// A peer can hold several at once and fips sends on exactly one — `active`.
+/// The others are warm standbys (`live`), still unproven (`probing`), in
+/// doubt (`suspect`) or kept for history (`dead`).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerPathView {
+    /// `ble`, `aware`, `udp` (the LAN/AP lane) or `tcp`.
+    pub lane: String,
+    /// `probing`, `live`, `suspect` or `dead`.
+    pub state: String,
+    /// Whether fips currently sends to this peer over this path.
+    pub active: bool,
+    /// `normal` or `backup`. A backup path yields to any selectable normal
+    /// one regardless of score.
+    pub role: String,
+    /// Minimum probe round trip in fips's window, ms; `None` until measured.
+    /// Selection scores on this, not on srtt, so load on the active path
+    /// does not by itself move traffic.
+    pub min_rtt_ms: Option<u64>,
+    /// RTT samples in the window; a standby needs `node.path.min_samples`
+    /// (default 2) before selection may pick it.
+    pub rtt_samples: u32,
+    /// Smoothed per-path expected transmission count.
+    pub etx: f64,
+    /// `etx × (1 + min_rtt/100)`, lower is better; `None` until measured.
+    pub score: Option<f64>,
 }
 
 /// One recorded BLE connect attempt as rendered for the Dev tab (DIAG-01/03).
@@ -267,15 +336,22 @@ pub struct BleStatus {
 /// Wi-Fi Aware bulk-lane status — the control/observation plane. The radio
 /// (attach/publish/subscribe/NDP) lives in the Android foreground service;
 /// the byte plane is the ordinary UDP transport over the NDP interface. See
-/// `docs/design/wifi-aware-interop.md`.
+/// `docs/design/fips/wifi-aware-interop.md`.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WifiAwareStatus {
     /// Master switch (the `SetWifiAwareEnabled` action).
     pub enabled: bool,
-    /// The UDP port the Aware radio advertises in its
-    /// service-specific info (0 while the lane is off).
+    /// The **base** UDP port of the Aware pool (0 while the lane is off). Slot
+    /// *i* listens on `port + i`, and the radio advertises the port of the slot
+    /// it pinned to each peer's data path — the base is what a peer discovered
+    /// before its slot is known is told, and is slot 0.
     pub port: u16,
+    /// How many peers the Aware lane can carry at once: the size of the UDP
+    /// instance pool the node bound at start. The radio allocates slots within
+    /// this range rather than keeping its own copy of the number, so the two
+    /// sides cannot disagree about which instances exist.
+    pub slots: u8,
     /// Whether the Aware lane is actively discovering right now — the Aware
     /// analogue of a BLE scan, sourced from the publish/subscribe session
     /// lifecycle (`publishSession != null || subscribeSession != null`), never

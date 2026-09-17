@@ -18,7 +18,7 @@ env:
   # `fips` is a gitignored path dep (reference/fips); a fresh checkout has none,
   # so clone the branch carrying the mobile/platform seams into place.
   FIPS_REPO: https://github.com/jmcorgan/fips.git
-  FIPS_REF: fix/platform-ble
+  FIPS_REF: feat/multi-path-switchover
 
 jobs:
   desktop:

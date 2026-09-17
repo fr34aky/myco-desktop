@@ -4,7 +4,7 @@
 > internet and no app store. On your computer.
 
 Myco Desktop is a Linux-first desktop client for **nsites** — self-contained web
-apps published on Nostr and shared peer-to-peer over a [FIPS](https://github.com/k0sti/fips)
+apps published on Nostr and shared peer-to-peer over a [FIPS](https://github.com/jmcorgan/fips)
 mesh (Bluetooth LE, Wi-Fi/LAN UDP). Pair with someone, and their apps land in
 your grid, each opening full-screen in its own window — online or fully offline.
 
@@ -20,8 +20,8 @@ around the very same **`myco-core`** Rust crate (linked directly, no FFI), so a
 laptop is a first-class peer on the same mesh as the phones.
 
 - **The app, the mesh, the concepts** → [Origami74/myco](https://github.com/Origami74/myco)
-  (start with its [concepts & glossary](https://github.com/Origami74/myco/blob/main/docs/design/concepts.md))
-- **The mesh transport** → [FIPS](https://github.com/k0sti/fips) (embedded here,
+  (start with its [concepts & glossary](https://github.com/Origami74/myco/blob/main/docs/design/core/concepts.md))
+- **The mesh transport** → [FIPS](https://github.com/jmcorgan/fips) (embedded here,
   or a system daemon)
 - **This desktop shell** → [`desktop/`](desktop/), designed in
   [`docs/design/desktop.md`](docs/design/desktop.md)
@@ -69,7 +69,7 @@ chmod +x Myco_*_amd64.AppImage && ./Myco_*_amd64.AppImage
 
 ## Build from source
 
-The workspace needs a local [fips](https://github.com/k0sti/fips) checkout at
+The workspace needs a local [fips](https://github.com/jmcorgan/fips) checkout at
 `reference/fips` (a gitignored path dependency — see
 [`docs/how-to/build.md`](docs/how-to/build.md) §4) plus the webkit2gtk/gtk3 dev
 packages:
@@ -104,4 +104,4 @@ sudo desktop/packaging/myco-setup ./target/debug/myco-desktop
 
 [MIT](LICENSE). Myco Desktop bundles `myco-core` from
 [Origami74/myco](https://github.com/Origami74/myco) and the
-[FIPS](https://github.com/k0sti/fips) mesh; see those projects for their terms.
+[FIPS](https://github.com/jmcorgan/fips) mesh; see those projects for their terms.

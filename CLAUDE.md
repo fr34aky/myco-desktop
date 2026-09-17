@@ -59,31 +59,39 @@ checklist in `PR-REVIEW.md`.
 
 The workspace depends on `fips` as a **path dependency at `reference/fips`** — a
 local, **gitignored** checkout. Nothing builds without it. CI clones
-`github.com/jmcorgan/fips` branch `fix/platform-ble` into place (see
-`.github/workflows/ci.yml`); upstream is `github.com/k0sti/fips`. That branch carries
-the local patches Myco needs: app-owned TUN, injectable `BleIo`, **per-peer PSM
-advertise/discover** (what makes desktop BlueZ BLE interoperate with Android), and a
-macOS `BleIo`. The Android Gradle build additionally reads `MYCO_FIPS_REPO_PATH` to
-emit a `patch.crates-io` override; those builds perturb `Cargo.lock`, so watch for a
-dirty lockfile afterwards. Details: `docs/how-to/build.md` §4.
+`github.com/jmcorgan/fips` branch `feat/multi-path-switchover` into place (see
+`.github/workflows/ci.yml`; upstream Myco pins the same branch); the canonical
+upstream is `github.com/k0sti/fips`. That branch carries the local patches Myco
+needs: app-owned TUN, injectable `BleIo`, **per-peer PSM advertise/discover** (what
+makes desktop BlueZ BLE interoperate with Android), a macOS `BleIo`, and multi-path
+switchover (several links to one peer, probed standbys). The `fips-multipath` cargo
+feature on `myco-core` turns the path-role configuration on; the desktop crate
+enables it because its checkout is that branch. The Android Gradle build additionally
+reads `MYCO_FIPS_REPO_PATH` to emit a `patch.crates-io` override; those builds
+perturb `Cargo.lock`, so watch for a dirty lockfile afterwards. Details:
+`docs/how-to/build.md` §4.
 
 ## Architecture
 
-One Cargo workspace, five members. The four original crates build into the Android
+One Cargo workspace, six members. The five upstream crates build into the Android
 `libmyco_core.so`; `desktop/src-tauri` is a plain binary on top of the same core.
 
 - **`myco-core`** — the app crate (`lib` + `cdylib`). Owns device identity (one Nostr
   keypair, persisted on first launch), the mesh node, the Tokio multi-thread runtime
   (`runtime.rs`), the TUN packet bridge, `.fips` DNS interception, peer diagnostics,
-  gossip, and paired file transfer.
+  gossip, paired file transfer, and the napplet host (`napplet.rs`).
 - **`nsite-deck`** — reusable, transport-agnostic nsite host: gateway (manifest → path
   → sha256 → serve), sync/import engine, propagator. Reaches the outside world only
   through four trait seams in `seams.rs`: `RelayBackend`, `BlobStore`, `PeerSource`,
   `FanoutSink`. It names no concrete relay, store, or radio — keep it that way.
+- **`myco-napplet-runtime`** — NIP-5D napplet runtime: manifest parsing, resolution,
+  the capability seams (identity, relay, outbox, mesh, resource), and the sandbox
+  shell page (`assets/`). Transport-agnostic like `nsite-deck`.
 - **`myco-relay`** — embedded NIP-01 relay implementing `RelayBackend` (ws on :4870).
-  Hand-rolled store over rust-nostr `Event` types, deliberately no relay framework:
-  manifests are replaceable/addressable (newest-per-slot, persisted to JSON); regular
-  events (chat) are by-id, ephemeral, memory-only.
+  Durable events (manifests, replaceable kinds, notes) live in rust-nostr's LMDB
+  store (`nostr-lmdb`, indexed NIP-01 queries, replaceable/addressable and NIP-09
+  semantics applied by the database); events with a NIP-40 `expiration` (chat) are
+  memory-only by design; deliberately no relay framework in front of it.
 - **`myco-blossom`** — embedded Blossom blob store implementing `BlobStore` (http on
   :24243). Content-addressed by sha256; verifies hash on write (atomic temp+rename),
   trusts the name on read.
@@ -182,6 +190,6 @@ See `docs/how-to/run-two-device-demo.md`.
 - Many docs under `docs/design/` and `docs/how-to/` were written in forward-looking
   "proposal voice" before the code existed and still say **TBD / open** — notably
   `build.md`, which is Android-era. Where a doc and the tree disagree, **the tree is
-  current** (justfile, Cargo.toml, `.github/workflows/`). `docs/design/concepts.md` is
+  current** (justfile, Cargo.toml, `.github/workflows/`). `docs/design/core/concepts.md` is
   the glossary; start there for terminology (npub/node_addr, `.fips` vs `.nsite`,
   Pillars of Propagation).

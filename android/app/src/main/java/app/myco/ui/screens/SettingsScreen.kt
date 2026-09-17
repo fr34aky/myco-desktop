@@ -21,13 +21,18 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.CallMade
+import androidx.compose.material.icons.filled.CallReceived
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DeveloperMode
 import androidx.compose.material.icons.filled.Lan
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
@@ -105,6 +110,8 @@ fun SettingsScreen(
     onBleToggle: (Boolean) -> Unit,
     wifiAwareSupported: Boolean,
     onWifiAwareToggle: (Boolean) -> Unit,
+    lanEnabled: Boolean,
+    onLanToggle: (Boolean) -> Unit,
     meshEnabled: Boolean,
     onMeshToggle: (Boolean) -> Unit,
     onOfflineOnlyToggle: (Boolean) -> Unit,
@@ -128,11 +135,16 @@ fun SettingsScreen(
             onBleToggle = onBleToggle,
             wifiAwareSupported = wifiAwareSupported,
             onWifiAwareToggle = onWifiAwareToggle,
+            lanEnabled = lanEnabled,
+            onLanToggle = onLanToggle,
             meshEnabled = meshEnabled,
             onMeshToggle = onMeshToggle,
             developerMode = developerMode,
             onDeveloperModeToggle = onDeveloperModeToggle,
             bleExhausted = bleExhausted,
+            onMeshReachChange = { publish, subscribe ->
+                client.dispatch(NativeActions.setNappletMeshReach(publish, subscribe))
+            },
             onOpenIdentity = { page = SettingsPage.Identity },
             onOpenStorage = { page = SettingsPage.Storage },
             onOpenDeveloper = { page = SettingsPage.Developer },
@@ -160,11 +172,14 @@ private fun RootSettings(
     onBleToggle: (Boolean) -> Unit,
     wifiAwareSupported: Boolean,
     onWifiAwareToggle: (Boolean) -> Unit,
+    lanEnabled: Boolean,
+    onLanToggle: (Boolean) -> Unit,
     meshEnabled: Boolean,
     onMeshToggle: (Boolean) -> Unit,
     developerMode: Boolean,
     onDeveloperModeToggle: (Boolean) -> Unit,
     bleExhausted: Boolean,
+    onMeshReachChange: (publishTtl: Int, subscribeTtl: Int) -> Unit,
     onOpenIdentity: () -> Unit,
     onOpenStorage: () -> Unit,
     onOpenDeveloper: () -> Unit,
@@ -234,10 +249,51 @@ private fun RootSettings(
                 enabled = meshEnabled && wifiAwareSupported,
             )
             RowDivider()
+            // The LAN lane: find and be found by peers on the same Wi-Fi via
+            // mDNS. Off stops both the browse and our own advert; a peer that
+            // already has our address can still dial in.
+            ToggleRow(
+                icon = Icons.Filled.Router,
+                title = "Network (LAN)",
+                subtitle = "Find peers on the same local network",
+                checked = lanEnabled,
+                onToggle = onLanToggle,
+                enabled = meshEnabled,
+            )
+            RowDivider()
             SoonRow(
                 icon = Icons.Filled.Public,
                 title = "Internet",
                 subtitle = "Mesh over the internet",
+            )
+        }
+
+        // How far apps (napplets granted `mesh`) may reach: a hop budget for
+        // what they send and one for what they ask for. Two numbers because a
+        // flooded read costs every hop an answer as well as a forward, so it
+        // defaults lower. Zero keeps an app's traffic on this phone.
+        Spacer(Modifier.height(8.dp))
+        GroupLabel("APP REACH")
+        SectionCard {
+            val reach = state.nappletMeshReach
+            HopsRow(
+                icon = Icons.Filled.CallMade,
+                title = "Sending",
+                subtitle = "How far apps may send over the mesh",
+                hops = reach.publishTtl,
+                max = reach.publishMax,
+                onChange = { onMeshReachChange(it, reach.subscribeTtl) },
+                enabled = meshEnabled,
+            )
+            RowDivider()
+            HopsRow(
+                icon = Icons.Filled.CallReceived,
+                title = "Fetching",
+                subtitle = "How far apps may look for what they missed",
+                hops = reach.subscribeTtl,
+                max = reach.subscribeMax,
+                onChange = { onMeshReachChange(reach.publishTtl, it) },
+                enabled = meshEnabled,
             )
         }
 
@@ -1050,6 +1106,47 @@ private fun ToggleRow(
             Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
         Switch(checked = checked, onCheckedChange = onToggle, enabled = enabled)
+    }
+}
+
+/**
+ * A hop-count stepper: `−` / value / `+`, clamped to `0..max`. The value is
+ * worded, because "2" says nothing to someone who has never heard of a hop.
+ */
+@Composable
+private fun HopsRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    hops: Int,
+    max: Int,
+    onChange: (Int) -> Unit,
+    enabled: Boolean = true,
+) {
+    val contentColor = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+    val wording = when (hops) {
+        0 -> "This phone only"
+        1 -> "Phones next to you (1 hop)"
+        else -> "$hops hops out"
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        LeadingIcon(icon, tint = contentColor)
+        Spacer(Modifier.size(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, color = contentColor, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
+            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            Text(wording, color = contentColor, style = MaterialTheme.typography.bodySmall)
+        }
+        IconButton(onClick = { onChange((hops - 1).coerceAtLeast(0)) }, enabled = enabled && hops > 0) {
+            Icon(Icons.Filled.Remove, contentDescription = "Fewer hops")
+        }
+        Text("$hops", color = contentColor, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
+        IconButton(onClick = { onChange((hops + 1).coerceAtMost(max)) }, enabled = enabled && hops < max) {
+            Icon(Icons.Filled.Add, contentDescription = "More hops")
+        }
     }
 }
 

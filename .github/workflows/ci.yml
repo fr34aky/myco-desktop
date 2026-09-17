@@ -10,13 +10,15 @@ on:
 
 env:
   # `fips` is a gitignored local path dep (reference/fips). A fresh checkout has no
-  # reference/ at all, so clone the branch carrying the mobile seams: Android
-  # BLE as a backend behind the existing `BleIo` trait, per-instance transport
-  # addressing (the LAN and Wi-Fi Aware lanes need one UDP socket each), and the
-  # app-owned TUN/UDP/radio seams. Built on current fips master; each commit is
-  # shaped to be cherry-picked upstream on its own.
+  # reference/ at all, so clone it here.
+  #
+  # The mobile seams this app builds on are upstream on master. Multi-path
+  # peering (several links to one peer, probed standbys, switchover) is not
+  # yet: it lives on the `feat/multi-path-switchover` branch, which is what
+  # the multi-path peer view and v0.7.0 build against. Back to master once
+  # it merges.
   FIPS_REPO: https://github.com/jmcorgan/fips.git
-  FIPS_REF: fix/platform-ble
+  FIPS_REF: feat/multi-path-switchover
   NDK_VERSION: 26.1.10909125
   CARGO_TERM_COLOR: always
 
@@ -53,11 +55,11 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
-      # Non-gating: surfaces clippy findings without failing on the workspace's
-      # pre-existing warnings.
+      # Gate: Myco's crates are clippy-clean and stay that way. `--workspace`
+      # covers every member and never `reference/fips` (excluded in the root
+      # Cargo.toml), whose own warnings are upstream's.
       - name: Clippy
-        continue-on-error: true
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --workspace
@@ -80,6 +82,12 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The action's default is `tools platform-tools`; the legacy `tools`
+          # package is gone from the SDK repository, and sdkmanager fails the
+          # whole step on the one it cannot find. Gradle pulls the platform and
+          # build-tools it needs itself.
+          packages: platform-tools
 
       - name: Install Android NDK ${{ env.NDK_VERSION }}
         run: sdkmanager "ndk;${NDK_VERSION}"
