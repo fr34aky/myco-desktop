@@ -4,7 +4,8 @@
 > internet and no app store. On your computer.
 
 Myco Desktop is a Linux-first desktop client for **nsites** — self-contained web
-apps published on Nostr and shared peer-to-peer over a [FIPS](https://github.com/jmcorgan/fips)
+apps published on Nostr — and **napplets** — sandboxed programs with a
+permission model — shared peer-to-peer over a [FIPS](https://github.com/jmcorgan/fips)
 mesh (Bluetooth LE, Wi-Fi/LAN UDP). Pair with someone, and their apps land in
 your grid, each opening full-screen in its own window — online or fully offline.
 
@@ -34,14 +35,21 @@ the same core:
 | | |
 | :-- | :-- |
 | ![Circle & QR pairing](docs/images-desktop/circle.png) | **Circle** — pair with a phone by showing a QR code (or pasting a `myco://` code), see who's in your circle, and **send files** to any paired peer over the mesh, with consent on the other end. |
-| ![Discover](docs/images-desktop/discover.png) | **Discover** — a suggested set of public nsites, plus whatever the peers in your circle are carrying right now. |
-| ![Settings](docs/images-desktop/settings.png) | **Settings** — which mesh backend is running (system daemon or embedded node), storage usage and wipes, an offline-only switch, and your device identity. |
+| ![Discover](docs/images-desktop/discover.png) | **Discover** — a suggested set of public nsites and napplets (Mappy, Minesweeper, DingDong), plus whatever the peers in your circle are carrying right now. A tap on a napplet fetches it and opens install review; nothing is granted until you say so. |
+| ![Settings](docs/images-desktop/settings.png) | **Settings** — which mesh backend is running (system daemon or embedded node), storage usage and wipes, an offline-only switch, **App reach** (how far apps may send and look over the mesh, in hops), and your device identity. |
 
 - **Apps** — every installed nsite and napplet as a tile; each opens chrome-less
-  in its own window — nsites served from a loopback gateway exactly as on the
-  phone, napplets sandboxed inside the same trusted shell page the phone uses,
-  with install review and per-capability permissions.
-- **Dev** — peer diagnostics (transports, RTT, lanes) and a speed test.
+  in its own window. Nsites are served from a loopback gateway exactly as on the
+  phone. Napplets (marked 🦆) run sandboxed inside the same trusted shell page
+  the phone uses, with no network of their own: everything they do goes through
+  capabilities Myco implements. Install review shows what a napplet will be able
+  to do before anything is granted; right-click for **Manage permissions**
+  (live switches per capability), **Reload app**, **Share** (a QR the phone
+  scans to pair with you and fetch the app), and **Add to launcher**. Paste an
+  `naddr` into *Add* to fetch one by hand.
+- **Dev** — peer diagnostics: every path the mesh holds to a peer (lane, state,
+  RTT, ETX, score) with the active lane and standbys on the row, connect
+  history, and a speed test.
 
 ## Mesh backends
 
