@@ -7,39 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-09-16
+## [0.2.0] - 2026-09-17
+
+Tracks upstream Myco 0.7.0 (its entries are further down, under the upstream
+headings). Everything here is the desktop app.
 
 ### Added
 
-- Desktop (daemon mode): a mesh-firewall drop-in (`desktop/packaging/myco.nft`)
-  that opens Myco's ports on `fips0`. The fips daemon's default-deny baseline
-  was silently dropping pair requests and app pulls from phones; the README
+- **Napplets.** The Apps grid now holds napplets beside nsites, exactly as on
+  the phone — single-file NIP-5D programs that Myco *hosts* rather than serves.
+  Add one by pasting its `naddr` into *Add*, from a `myco://share` link a phone
+  shows you, or from Discover's suggestions (Mappy, Minesweeper, DingDong;
+  DingDong comes preinstalled). Install review lists what the app will be able
+  to do before anything is granted. Each napplet opens in its own window,
+  sandboxed inside the same trusted shell page the phone uses, with no network
+  of its own — everything it does goes through Myco.
+- **Manage permissions** and **Reload app** on a napplet's right-click menu.
+  A permission switch is live: an open window restarts under the new grants.
+- **Settings › App reach** — how far apps may send and look over the mesh, in
+  hops, with zero keeping an app's traffic on this device.
+- **Dev tab: every path to a peer** (lane, state, min RTT, samples, ETX,
+  score), with the active lane and the standbys on the peer's row, now that
+  the mesh core keeps several links to one peer.
+- **Daemon mode: the mesh-firewall drop-in** `desktop/packaging/myco.nft`,
+  which opens Myco's ports on `fips0`. The fips daemon's default-deny baseline
+  was silently dropping pair requests and app pulls from phones. The README
   now says so, along with the `rendezvous.lan` line same-Wi-Fi pairing needs.
-- Desktop: napplets. The Apps grid now holds napplets beside nsites, exactly
-  as on the phone — add one by pasting its `naddr` into *Add*, from a
-  `myco://share` link a phone shows you, or from Discover's suggestions
-  (Mappy, Minesweeper, DingDong; DingDong comes preinstalled). Install
-  review lists what the app will be able to do before anything is granted;
-  right-click a napplet for *Manage permissions* and *Reload app*. Each
-  napplet opens in its own window, sandboxed, with no network of its own —
-  everything it does goes through Myco. Settings › App reach caps how far
-  apps may send and look over the mesh.
-- Desktop: the Dev tab shows every path to a peer (lane, state, RTT,
-  samples, ETX, score), with the active lane and the standbys on the peer's
-  row, now that the mesh core keeps several links to one peer.
-- Desktop: the relay store moved to LMDB with this release; an existing
-  `events.json` is migrated on first launch and kept as `events.json.migrated`.
-- Desktop (embedded mode): a phone on the same Wi-Fi is found over mDNS and
-  dialled over UDP, so transfers and sync stop waiting on Bluetooth when a
-  LAN is available.
-- Desktop: paired file transfer. A paired phone can send a file straight to
-  the desktop over the mesh — an Accept/Decline prompt appears, and the file
-  lands in `~/Downloads/Myco`. "Send file…" on a Circle contact sends the
-  other way. Live and failed transfers show on the Circle tab with
-  Cancel/Dismiss, as on the phone.
-- Desktop: the LAN share page saves an accepted file in-page instead of
-  handing it to Android's download manager, which refuses a mesh-only (VPN,
-  no internet) network with "check your internet connection".
+
+### Changed
+
+- The relay store moved to LMDB. An existing `events.json` is migrated on
+  first launch and kept beside the store as `events.json.migrated`.
+- Launcher shortcuts and share links now cover napplets
+  (`myco://napplet/<pointer>`, `myco://share` with a `napplet` payload).
+
+## [0.1.0] - 2026-08-22
+
+The first desktop release: a Linux Tauri shell around the same `myco-core`
+the Android app uses, shipped as a `.deb` and an AppImage.
+
+### Added
+
+- The five surfaces of the phone — Apps, Circle, Discover, Settings, Dev —
+  with every nsite opening chrome-less in its own window off a loopback
+  gateway.
+- Two mesh backends: the system fips daemon when one is running, else an
+  embedded fips node with its own BLE, LAN UDP and `fips0` TUN (one-time
+  `sudo desktop/packaging/myco-setup`).
+- Pairing by showing a QR code or pasting a `myco://` code; `myco://pair`,
+  `share` and `app` links open the running app from the desktop.
+- File sharing: a LAN share page (mesh-only or this-network) with a consent
+  gate, and the core's encrypted paired transfer — a paired phone can send a
+  file straight to the desktop (Accept/Decline prompt, lands in
+  `~/Downloads/Myco`); "Send file…" on a Circle contact sends the other way,
+  with live and failed transfers on the Circle tab.
+- Embedded mode finds a phone on the same Wi-Fi over mDNS and dials it over
+  UDP, so transfers and sync stop waiting on Bluetooth when a LAN is there.
+
+### Fixed
+
+- The LAN share page saves an accepted file in-page instead of handing it to
+  Android's download manager, which refuses a mesh-only (VPN, no internet)
+  network with "check your internet connection".
+
+---
+
+## Upstream Myco
+
+The Android app and the shared core keep their own history, merged in with
+each upstream sync.
+
+## [0.7.0] - 2026-09-16
+
+### Added
 
 - **Napplets.** Myco runs napplets — single-file NIP-5D programs published
   on Nostr — beside nsites, as its own apps. Add one by `naddr` (paste, QR,
