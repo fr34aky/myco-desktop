@@ -32,7 +32,17 @@ The desktop runs in one of two modes, selected at startup (`MeshBackend` in
   daemon's TUN, and `CircleGate`'s source-IP checks work unchanged. Outbound
   content rides the daemon's TUN and `.fips` DNS via the system resolver —
   zero code. `StartNode`/`StopNode` become a hint: the mesh lifecycle belongs
-  to systemd.
+  to systemd. Two things the daemon's own defaults get wrong for Myco, both
+  operator settings rather than code: its `fips0` firewall baseline
+  (`/etc/fips/fips.nft`, loaded by `fips-firewall.service`) is default-deny
+  for anything a peer initiates, which is exactly what a pair request, a
+  relay pull and a Blossom fetch are — `desktop/packaging/myco.nft` is the
+  `/etc/fips/fips.d/` drop-in that opens 4870/4873/24243, and without it
+  pairing looks like nothing happening while the daemon's drop counter
+  climbs. And LAN rendezvous (`node.rendezvous.lan.enabled`) is off by
+  default, so a same-Wi-Fi phone never finds the daemon; the phone still
+  dials a *scoped* daemon advert, but a scoped daemon never dials the
+  phone's unscoped one, so leave `scope` unset.
 - **Embedded mode** (fallback for machines without a daemon): a fips node in
   process, as on Android, but with `TunPolicy::SystemTun` (fips creates and
   configures `fips0` itself — requires `CAP_NET_ADMIN`), BLE via fips's own

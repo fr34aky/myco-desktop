@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Desktop (daemon mode): a mesh-firewall drop-in (`desktop/packaging/myco.nft`)
+  that opens Myco's ports on `fips0`. The fips daemon's default-deny baseline
+  was silently dropping pair requests and app pulls from phones; the README
+  now says so, along with the `rendezvous.lan` line same-Wi-Fi pairing needs.
 - Desktop: napplets. The Apps grid now holds napplets beside nsites, exactly
   as on the phone — add one by pasting its `naddr` into *Add*, from a
   `myco://share` link a phone shows you, or from Discover's suggestions

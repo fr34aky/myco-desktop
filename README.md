@@ -49,6 +49,11 @@ The shell links `myco-core` directly and picks a backend at startup:
 
 - **Daemon mode** (default when a system fips daemon answers) — talk to the
   running daemon over its control socket; the mesh lifecycle belongs to systemd.
+  Two one-time daemon settings make a phone reachable: open Myco's ports in the
+  daemon's mesh firewall (`sudo cp desktop/packaging/myco.nft /etc/fips/fips.d/
+  && sudo nft -f /etc/fips/fips.nft` — without it a pair request is silently
+  dropped) and, for same-Wi-Fi pairing, `node.rendezvous.lan.enabled: true` in
+  `/etc/fips/fips.yaml`.
 - **Embedded mode** (fallback) — an in-process fips node like the phone: its own
   BLE, LAN UDP, and `fips0` TUN. One-time `sudo desktop/packaging/myco-setup`
   grants the TUN capability and wires `.fips` name resolution.

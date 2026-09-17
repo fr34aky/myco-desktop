@@ -1,0 +1,14 @@
+# Myco desktop — inbound allowances on the fips0 mesh interface (daemon mode).
+#
+# The fips daemon ships a default-deny baseline for fips0 (/etc/fips/fips.nft):
+# nothing a mesh peer initiates gets in unless a drop-in here says so. Myco
+# is reached *by* peers — a pair request arrives on the auth port, a paired
+# phone pulls apps from the relay and Blossom — so without this file pairing
+# looks like nothing happening. Install:
+#
+#   sudo cp desktop/packaging/myco.nft /etc/fips/fips.d/myco.nft
+#   sudo nft -f /etc/fips/fips.nft
+#
+# Ports: docs/reference/ports.md. The auth port is the one an unpaired peer
+# may reach; the relay and Blossom gate on Circle membership themselves.
+tcp dport { 4870, 4873, 24243 } accept
