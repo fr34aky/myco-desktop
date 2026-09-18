@@ -82,6 +82,11 @@ sudo apt install ./Myco_*_amd64.deb
 chmod +x Myco_*_amd64.AppImage && ./Myco_*_amd64.AppImage
 ```
 
+On a machine with NVIDIA's own driver, 0.2.0 and earlier abort at launch with
+`Could not create GBM EGL display`. Start those versions with
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` in the environment; builds after 0.2.0 set it
+themselves.
+
 ## Build from source
 
 The workspace needs a local [fips](https://github.com/jmcorgan/fips) checkout at

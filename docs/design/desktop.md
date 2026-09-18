@@ -144,6 +144,18 @@ verifies `probe.localhost` resolves to loopback and errors clearly if not.
   summary `aware [ble]` on line 2 — the phone's multi-path peer view. The
   desktop crate builds `myco-core` with `fips-multipath`, so BLE is a
   backup-role path as on Android and `multipath_core` is true.
+- NVIDIA: when `/proc/driver/nvidia/version` exists (NVIDIA's own driver,
+  never nouveau) `main` sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` as its very
+  first act — `set_var` is only sound while the process has one thread.
+  WebKitGTK's DMABUF renderer gets no GBM from that driver: the AppImage's
+  bundled WebKit aborts at launch ("Could not create GBM EGL display"), a
+  newer host WebKit leaves the window unpainted under X11 and dies on a
+  Wayland protocol error natively. The narrower
+  `WEBKIT_DMABUF_RENDERER_DISABLE_GBM` was tried and cures only the first,
+  so the whole renderer goes, at the cost of accelerated compositing on
+  those machines. A value already in the environment wins, and WebKit reads
+  `0` as "keep the renderer", so the workaround can be switched off without
+  a rebuild.
 
 ## Napplets
 
