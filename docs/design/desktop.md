@@ -39,7 +39,14 @@ The desktop runs in one of two modes, selected at startup (`MeshBackend` in
   relay pull and a Blossom fetch are — `desktop/packaging/myco.nft` is the
   `/etc/fips/fips.d/` drop-in that opens 4870/4873/24243, and without it
   pairing looks like nothing happening while the daemon's drop counter
-  climbs. And LAN rendezvous (`node.rendezvous.lan.enabled`) is off by
+  climbs. The package ships no `fips.d/`, so install the drop-in with
+  `install -D`. That table is not the only one on the path: a host firewall
+  hooks the same input and a packet must pass both, so with UFW on
+  (default-deny inbound — Omarchy's default) the same three ports need
+  `ufw allow in on fips0 …` as well. The tell is asymmetry: the desktop's
+  own pair request is delivered (outbound, and its replies are
+  `established`), the phone's never arrives, and the kernel log fills with
+  `[UFW BLOCK] IN=fips0 … DPT=4873`. And LAN rendezvous (`node.rendezvous.lan.enabled`) is off by
   default, so a same-Wi-Fi phone never finds the daemon; the phone still
   dials a *scoped* daemon advert, but a scoped daemon never dials the
   phone's unscoped one, so leave `scope` unset.
