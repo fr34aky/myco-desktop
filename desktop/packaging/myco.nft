@@ -6,8 +6,14 @@
 # phone pulls apps from the relay and Blossom — so without this file pairing
 # looks like nothing happening. Install:
 #
-#   sudo cp desktop/packaging/myco.nft /etc/fips/fips.d/myco.nft
+#   sudo install -D -m 0644 desktop/packaging/myco.nft /etc/fips/fips.d/myco.nft
 #   sudo nft -f /etc/fips/fips.nft
+#
+# (`install -D`: the fips package does not create fips.d.) This table is not
+# the only filter on fips0 — a host firewall such as UFW sees the same packets
+# and must allow the same ports:
+#
+#   sudo ufw allow in on fips0 proto tcp to any port 4870,4873,24243
 #
 # Ports: docs/reference/ports.md. The auth port is the one an unpaired peer
 # may reach; the relay and Blossom gate on Circle membership themselves.

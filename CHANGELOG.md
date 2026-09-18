@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The daemon-mode setup steps work as written. The README's firewall line
+  failed on a machine where `/etc/fips/fips.d/` did not exist yet, and it never
+  mentioned the host firewall: with UFW on — the default on Omarchy — a phone's
+  pair request was still dropped after following it, while pairing from the
+  desktop half-worked. Both steps are now spelled out, with the log line that
+  shows which firewall is dropping.
+
 ## [0.2.1] - 2026-09-19
 
 ### Fixed
