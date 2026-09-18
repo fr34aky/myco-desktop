@@ -27,7 +27,54 @@ use tauri::Manager;
 /// The one runtime behind every command and the poll thread.
 pub struct Core(pub Mutex<AppRuntime>);
 
+const DMABUF_VAR: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+
+/// What to set [`DMABUF_VAR`] to, if anything: `1` where NVIDIA's own driver
+/// is loaded, unless the environment already says something.
+///
+/// WebKitGTK's DMABUF renderer needs GBM, and with that driver it does not
+/// get it. Three faces of one fault, all seen on one hybrid Intel+NVIDIA box
+/// — so the driver being loaded is the test, not which GPU drives the screen:
+/// the AppImage's bundled WebKit logs "Could not create GBM EGL display:
+/// EGL_SUCCESS. Aborting..." and aborts before the first window (its hook
+/// forces `GDK_BACKEND=x11`, tauri#8541); a newer host WebKit under X11 stays
+/// up over a window it never paints; under native Wayland it dies on "Error
+/// 71 (Protocol error)". The narrower `WEBKIT_DMABUF_RENDERER_DISABLE_GBM`
+/// cures only the first, which is why the whole renderer goes.
+///
+/// A value already in the environment wins, whatever it is: WebKit reads `0`
+/// as "leave the renderer on", the way back for a driver that has since
+/// learned to do this. Intel and AMD machines are never touched.
+fn dmabuf_override(
+    existing: Option<&std::ffi::OsStr>,
+    nvidia_driver: bool,
+) -> Option<&'static str> {
+    (existing.is_none() && nvidia_driver).then_some("1")
+}
+
+/// Apply [`dmabuf_override`]. Call it first thing in `main`: `set_var` is only
+/// sound while the process has one thread — GTK, GLib and the tokio runtime
+/// all `getenv` from theirs — and that is a stricter bound than "before the
+/// first webview", which is all WebKit itself asks.
+fn disable_dmabuf_renderer_on_nvidia() {
+    // Only NVIDIA's driver creates this, never nouveau. A /proc we cannot
+    // read (a sandbox masking it) is not "no NVIDIA"; say so, since the
+    // abort that follows names nothing.
+    let nvidia = std::path::Path::new("/proc/driver/nvidia/version")
+        .try_exists()
+        .unwrap_or_else(|e| {
+            eprintln!("myco-desktop: cannot tell whether the NVIDIA driver is loaded ({e}); if the window stays empty or the app aborts, set {DMABUF_VAR}=1");
+            false
+        });
+    if let Some(value) = dmabuf_override(std::env::var_os(DMABUF_VAR).as_deref(), nvidia) {
+        std::env::set_var(DMABUF_VAR, value);
+        eprintln!("myco-desktop: NVIDIA driver loaded, WebKit's DMABUF renderer is off ({DMABUF_VAR}={value})");
+    }
+}
+
 fn main() {
+    disable_dmabuf_renderer_on_nvidia();
+
     // The core speaks tracing; without a subscriber every sync failure is
     // silent. RUST_LOG overrides; info is the useful default.
     tracing_subscriber::fmt()
@@ -161,4 +208,29 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("tauri: event loop failed to start");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dmabuf_override;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn the_nvidia_driver_turns_the_dmabuf_renderer_off() {
+        assert_eq!(dmabuf_override(None, true), Some("1"));
+    }
+
+    #[test]
+    fn other_gpus_keep_the_dmabuf_renderer() {
+        assert_eq!(dmabuf_override(None, false), None);
+    }
+
+    #[test]
+    fn a_value_already_in_the_environment_wins() {
+        // `0` is WebKit's "leave it on" — the opt-out — and an empty value
+        // is still the user having said something.
+        for existing in ["0", "1", ""] {
+            assert_eq!(dmabuf_override(Some(OsStr::new(existing)), true), None);
+        }
+    }
 }

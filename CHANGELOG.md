@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Myco starts on machines with NVIDIA's own driver. The AppImage aborted at
+  every launch with "Could not create GBM EGL display", before a window
+  appeared — a laptop or desktop with an Intel chip beside the NVIDIA card
+  included — and a build against a newer system WebKit opened a window that
+  never painted, or quit on a Wayland protocol error. Myco now turns WebKit's
+  DMABUF renderer off when that driver is loaded; Intel and AMD machines keep
+  it, and `WEBKIT_DISABLE_DMABUF_RENDERER=0` keeps it on NVIDIA too. For 0.2.0
+  and earlier, start the app with `WEBKIT_DISABLE_DMABUF_RENDERER=1`.
+
 ## [0.2.0] - 2026-09-17
 
 Brings the desktop up to upstream Myco 0.7.0. The core under this release is
