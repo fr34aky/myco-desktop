@@ -9,26 +9,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-09-17
 
-Tracks upstream Myco 0.7.0 (its entries are further down, under the upstream
-headings). Everything here is the desktop app.
+Brings the desktop up to upstream Myco 0.7.0. The core under this release is
+0.7.0's, so what changed there for apps, the mesh, file transfer and storage
+changed here too; the entries below say what that means on the desktop. The
+phone-only parts of 0.7.0 — Wi-Fi Aware, the VPN tunnel, the Sharesheet,
+NFC — are under the upstream heading further down.
+
+No wire-format change: a 0.2.0 desktop still pairs with a 0.6.x phone and
+exchanges apps, messages and files with it. The multi-path link only forms
+with a phone on 0.7.0; an older one keeps linking over a single path.
 
 ### Added
 
 - **Napplets.** The Apps grid now holds napplets beside nsites, exactly as on
   the phone — single-file NIP-5D programs that Myco *hosts* rather than serves.
   Add one by pasting its `naddr` into *Add*, from a `myco://share` link a phone
-  shows you, or from Discover's suggestions (Mappy, Minesweeper, DingDong;
+  shows you (the sharer's phone is asked first, so it arrives with no
+  internet), or from Discover's suggestions (Mappy, Minesweeper, DingDong;
   DingDong comes preinstalled). Install review lists what the app will be able
-  to do before anything is granted. Each napplet opens in its own window,
-  sandboxed inside the same trusted shell page the phone uses, with no network
-  of its own — everything it does goes through Myco.
+  to do — what it declares plus the defaults — before anything is granted.
+  Each napplet opens in its own window, sandboxed inside the same trusted
+  shell page the phone uses, with no network of its own — everything it does
+  goes through capabilities Myco implements on its behalf:
+  - **Identity** — a user key, separate from the mesh device key, created the
+    first time a napplet opens. The device is never named in anything that
+    key signs.
+  - **Relays** — read and post as you on this device's relay and the public
+    relays when reachable. Posting your profile, contacts, relay list or
+    deletions is refused for now, not silently dropped.
+  - **Outbox** — an author's notes from the relays they publish to, a phone
+    across the room or a public relay, with an honest `incomplete` when a
+    relay never answered.
+  - **Mesh** — Myco's own: publish to everyone nearby with a chosen hop
+    count, and pull what was missed.
+  - **Pictures and files** — by content hash: this device first, then a
+    paired device over the mesh, then the public servers. What is fetched is
+    kept for the next app and the next device in the room.
 - **Manage permissions** and **Reload app** on a napplet's right-click menu.
   A permission switch is live: an open window restarts under the new grants.
+  What you switch off stays off, and an update that asks for more than you
+  were shown goes back through install review before it gets it.
+- **Check for updates** refreshes napplets beside nsites. The version you open
+  is always the one whose bytes are on this device — a newer manifest with
+  nothing behind it cannot take an app off the air. A tile says "not on this
+  device" when its file is gone (after *Delete cache*, say); *Reload app*
+  fetches it again, the sharer first.
 - **Settings › App reach** — how far apps may send and look over the mesh, in
-  hops, with zero keeping an app's traffic on this device.
+  hops (3 and 2 by default), with zero keeping an app's traffic on this
+  device.
+- **Peers keep every link they have.** The mesh holds more than one path to a
+  peer — Bluetooth and the local network — probes the standbys so they are
+  known to work, and moves traffic when the active one degrades, instead of
+  dropping the peer and finding it again from scratch. Bluetooth is now the
+  backup: a phone on the same Wi-Fi is carried over UDP, with Bluetooth ready
+  underneath for when the network goes away. This is the embedded node, built
+  on fips's multi-path branch; in daemon mode it is whatever the system
+  daemon was built from.
 - **Dev tab: every path to a peer** (lane, state, min RTT, samples, ETX,
-  score), with the active lane and the standbys on the peer's row, now that
-  the mesh core keeps several links to one peer.
+  score), with the active lane and the standbys on the peer's row.
+- **A 0.7.0 phone announces itself on the local network** the way a fips node
+  does, and re-resolves a desktop it first saw under a link-local address.
+  That is the other half of 0.1.0's same-Wi-Fi discovery: desktop and phone
+  now find each other over the network in both directions, and the phone has
+  a *Network (LAN)* switch for it under Settings → Mesh.
+- Nsite manifests declaring a NIP-5A aggregate hash are checked against it; a
+  mismatch is logged and the site is served on its per-blob hashes. A napplet,
+  whose identity the aggregate is, is refused instead.
 - **Daemon mode: the mesh-firewall drop-in** `desktop/packaging/myco.nft`,
   which opens Myco's ports on `fips0`. The fips daemon's default-deny baseline
   was silently dropping pair requests and app pulls from phones. The README
@@ -36,10 +82,32 @@ headings). Everything here is the desktop app.
 
 ### Changed
 
-- The relay store moved to LMDB. An existing `events.json` is migrated on
-  first launch and kept beside the store as `events.json.migrated`.
+- The relay store moved to LMDB: indexed queries and one small write per
+  event. Chat and other expiring messages stay in memory and never touch
+  disk, as before. An existing `events.json` is migrated on first launch and
+  kept beside the store as `events.json.migrated`; if any event fails to
+  migrate, the file is left where it was.
 - Launcher shortcuts and share links now cover napplets
   (`myco://napplet/<pointer>`, `myco://share` with a `napplet` payload).
+
+### Fixed
+
+- A file transfer survives a flaky link. A lost offer, accept or "ready" is
+  re-sent until the other side has heard it, instead of leaving both ends
+  waiting while Bluetooth re-dials.
+- A large file over a slow hop is only given up when nothing has arrived for
+  thirty seconds, not when a fixed clock runs out.
+
+### Known issues
+
+- **A napplet's relay access is all-or-nothing.** The `relay` grant lets a
+  napplet read everything your relay holds, including what other napplets
+  stored.
+- **A napplet may name its own relays.** With the outbox grant it can ask Myco
+  to talk to a relay it chooses; that is by the specification, and it is an
+  exfiltration channel. Read install review.
+- Napplets do not replicate over the mesh yet. A paired device can hand you
+  one at install time; keeping them in sync afterwards is upstream roadmap.
 
 ## [0.1.0] - 2026-08-22
 
